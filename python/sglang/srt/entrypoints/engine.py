@@ -1067,7 +1067,7 @@ def _wait_for_scheduler_ready(
     return scheduler_infos
 
 
-def _launch_schedulers(
+def _launch_scheduler_processes(
     server_args: ServerArgs,
     port_args: PortArgs,
     run_scheduler_process_func: Callable,
@@ -1082,7 +1082,9 @@ def _launch_schedulers(
     """
     if server_args.use_ray:
         return _launch_scheduler_ray_actors(
-            server_args, port_args, ray_cluster_info=ray_cluster_info,
+            server_args,
+            port_args,
+            ray_cluster_info=ray_cluster_info,
         )
     else:
         return _launch_scheduler_processes_mp(
@@ -1217,7 +1219,7 @@ def _launch_scheduler_processes_mp(
 def _get_rank0_node_ip(placement_group) -> str:
     """Get the IP address of the node where rank 0 will run.
 
-    Uses a probe actor to discover the IP of the first placement group's node.
+    Uses a probe task to discover the IP of the first placement group's node.
     This is needed because rank 0 starts the TCPStore server for torch.distributed,
     so dist_init_addr must be the IP of the node where rank 0 runs, not the driver node.
     """
@@ -1225,23 +1227,17 @@ def _get_rank0_node_ip(placement_group) -> str:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
     @ray.remote(num_cpus=0, num_gpus=0)
-    class IPProbe:
-        def get_ip(self):
-            return ray.util.get_node_ip_address()
+    def get_node_ip():
+        return ray.util.get_node_ip_address()
 
-    probe = IPProbe.options(
-        scheduling_strategy=PlacementGroupSchedulingStrategy(
-            placement_group=placement_group,
-            placement_group_bundle_index=0,
-        ),
-    ).remote()
-
-    try:
-        ip = ray.get(probe.get_ip.remote(), timeout=30)
-    finally:
-        ray.kill(probe)
-
-    return ip
+    return ray.get(
+        get_node_ip.options(
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=placement_group,
+                placement_group_bundle_index=0,
+            ),
+        ).remote()
+    )
 
 
 def _launch_scheduler_ray_actors(
@@ -1295,8 +1291,6 @@ def _launch_scheduler_ray_actors(
     # Use pre-computed topology/PGs or create them (fallback)
     if topology is None or placement_groups is None:
         os.environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
-        if not ray.is_initialized():
-            ray.init()
 
         gpu_nodes = discover_gpu_nodes()
         if len(gpu_nodes) == 0:
@@ -1422,10 +1416,6 @@ def _launch_workers(
                     discover_gpu_nodes,
                 )
 
-                os.environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
-                if not ray.is_initialized():
-                    ray.init()
-
                 gpu_nodes = discover_gpu_nodes()
                 world_size = server_args.tp_size * server_args.pp_size
                 topology = create_cluster_topology(gpu_nodes, world_size)
@@ -1443,7 +1433,7 @@ def _launch_workers(
     logger.info(f"{server_args=}")
 
     # Launch schedulers (unified interface for both mp and Ray modes)
-    scheduler_result = _launch_schedulers(
+    scheduler_result = _launch_scheduler_processes(
         server_args=server_args,
         port_args=port_args,
         run_scheduler_process_func=run_scheduler_process_func,
