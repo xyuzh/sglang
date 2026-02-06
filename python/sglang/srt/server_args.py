@@ -5823,7 +5823,7 @@ class PortArgs:
         server_args: ServerArgs,
         dp_rank: Optional[int] = None,
         worker_ports: Optional[List[int]] = None,
-    ) -> "PortArgs":
+    ) -> PortArgs:
         if server_args.nccl_port is None:
             nccl_port = get_free_port()
         else:
