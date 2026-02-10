@@ -27,7 +27,18 @@ import random
 import signal
 import threading
 import time
-from typing import AsyncIterator, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from multiprocessing.connection import Connection
+from typing import (
+    Any,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
@@ -96,22 +107,22 @@ _is_cuda = is_cuda()
 
 
 @dataclasses.dataclass
-class SchedulerLaunchResult:
+class SchedulerInitResult:
     """Unified result from launching schedulers (mp or Ray mode).
 
     This abstraction hides the mode-specific details, providing a common interface
     for both multiprocessing and Ray-based scheduler launching.
     """
 
-    scheduler_infos: List[Dict]
+    scheduler_infos: List[Dict[str, Any]]
 
     # Ray mode fields
-    _actors: Optional[List] = None
-    _event_loop_refs: Optional[List] = None
+    _actors: Optional[List[Any]] = None  # List[ray.actor.ActorHandle]
+    _event_loop_refs: Optional[List[Any]] = None  # List[ray.ObjectRef]
 
     # mp mode fields
-    _procs: Optional[List] = None
-    _pipe_readers: Optional[List] = None
+    _procs: Optional[List[mp.Process]] = None
+    _pipe_readers: Optional[List[Connection]] = None
 
     def wait_for_ready(self) -> None:
         """Wait for schedulers to be ready (mp mode only, no-op for Ray).
@@ -142,7 +153,7 @@ class SchedulerLaunchResult:
                 )
 
     def cleanup(self) -> None:
-        """Clean up Ray actors and placement groups."""
+        """Clean up Ray actors."""
         if self._actors is not None:
             import ray
 
@@ -213,7 +224,6 @@ class Engine(EngineBase):
                 kwargs["log_level"] = "error"
             server_args = self.server_args_class(**kwargs)
         self.server_args = server_args
-        logger.info(f"{server_args=}")
 
         # Shutdown the subprocesses automatically when the program exits
         # Store the atexit function so we can unregister it later
@@ -226,7 +236,7 @@ class Engine(EngineBase):
             tokenizer_manager,
             template_manager,
             port_args,
-            scheduler_result,
+            scheduler_init_result,
         ) = _launch_workers(
             server_args=server_args,
             init_tokenizer_manager_func=self.init_tokenizer_manager_func,
@@ -235,12 +245,12 @@ class Engine(EngineBase):
         )
         self.tokenizer_manager = tokenizer_manager
         self.template_manager = template_manager
-        self.scheduler_info = scheduler_result.scheduler_infos[0]
+        self.scheduler_info = scheduler_init_result.scheduler_infos[0]
         self.port_args = port_args
-        self._scheduler_result = scheduler_result
+        self._scheduler_init_result = scheduler_init_result
         self.remote_instance_transfer_engine_info = (
             parse_remote_instance_transfer_engine_info_from_scheduler_infos(
-                scheduler_result.scheduler_infos
+                scheduler_init_result.scheduler_infos
             )
         )
 
@@ -542,8 +552,8 @@ class Engine(EngineBase):
 
     def _cleanup_processes(self):
         """Clean up Ray actors, placement groups, and child processes."""
-        if hasattr(self, "_scheduler_result") and self._scheduler_result is not None:
-            self._scheduler_result.cleanup()
+        if hasattr(self, "_scheduler_init_result") and self._scheduler_init_result is not None:
+            self._scheduler_init_result.cleanup()
         kill_process_tree(os.getpid(), include_parent=False)
 
     def _atexit_shutdown(self):
@@ -1041,11 +1051,11 @@ def _launch_scheduler_processes(
     server_args: ServerArgs,
     port_args: PortArgs,
     run_scheduler_process_func: Callable,
-) -> SchedulerLaunchResult:
+) -> SchedulerInitResult:
     """Launch schedulers using Ray actors or mp.Process.
 
     Returns:
-        SchedulerLaunchResult that abstracts the mode-specific details.
+        SchedulerInitResult that abstracts the mode-specific details.
         For Ray mode, scheduler_infos is already populated.
         For mp mode, call result.wait_for_ready() to populate scheduler_infos.
     """
@@ -1099,11 +1109,11 @@ def _launch_scheduler_processes_mp(
     server_args: ServerArgs,
     port_args: PortArgs,
     run_scheduler_process_func: Callable,
-) -> SchedulerLaunchResult:
+) -> SchedulerInitResult:
     """Launch scheduler processes using multiprocessing.
 
     Returns:
-        SchedulerLaunchResult with _procs and _pipe_readers set.
+        SchedulerInitResult with _procs and _pipe_readers set.
         scheduler_infos will be empty; call result.wait_for_ready() to populate it.
     """
     scheduler_procs = []
@@ -1195,7 +1205,7 @@ def _launch_scheduler_processes_mp(
         proc.start()
         scheduler_procs.append(proc)
 
-    return SchedulerLaunchResult(
+    return SchedulerInitResult(
         scheduler_infos=[],
         _procs=scheduler_procs,
         _pipe_readers=scheduler_pipe_readers,
@@ -1229,7 +1239,7 @@ def _get_rank0_node_ip(placement_group) -> str:
 def _launch_scheduler_ray_actors(
     server_args: ServerArgs,
     port_args: PortArgs,
-) -> SchedulerLaunchResult:
+) -> SchedulerInitResult:
     """Launch scheduler actors using Ray (unified single/multi-node).
 
     Auto-detects the current placement group via ``ray.util.get_current_placement_group()``.
@@ -1237,8 +1247,6 @@ def _launch_scheduler_ray_actors(
     bundle per node, each bundle having ``gpus_per_node`` GPUs.  Multiple SchedulerActors
     (``num_gpus=1`` each) share a bundle's GPU pool.
     """
-    import uuid
-
     import ray
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
@@ -1294,7 +1302,7 @@ def _launch_scheduler_ray_actors(
                 actor = SchedulerActor.options(
                     num_cpus=0,
                     num_gpus=1,
-                    name=f"sglang_scheduler_pp{pp_rank}_tp{tp_rank}",
+                    name=f"sglang_scheduler_rank0node={rank0_node_ip}_pp{pp_rank}_tp{tp_rank}",
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg,
                         placement_group_bundle_index=node_idx,
@@ -1327,7 +1335,7 @@ def _launch_scheduler_ray_actors(
     # Start event loops (non-blocking)
     event_loop_refs = [actor.run_event_loop.remote() for actor in scheduler_actors]
 
-    return SchedulerLaunchResult(
+    return SchedulerInitResult(
         scheduler_infos=scheduler_infos,
         _actors=scheduler_actors,
         _event_loop_refs=event_loop_refs,
@@ -1344,7 +1352,7 @@ def _launch_workers(
     TokenizerManager,
     TemplateManager,
     PortArgs,
-    SchedulerLaunchResult,
+    SchedulerInitResult,
 ]:
     """
     Launch the TokenizerManager in the main process, the Scheduler workers (as subprocesses
