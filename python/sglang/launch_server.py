@@ -29,10 +29,11 @@ def run_server(server_args):
 
         asyncio.run(serve_grpc(server_args))
     elif server_args.use_ray:
-        from sglang.srt.ray.http_server import launch_ray_server
+        from sglang.srt.ray.http_server import launch_server
 
-        launch_ray_server(server_args)
+        launch_server(server_args)
     else:
+        # Default mode: HTTP mode.
         from sglang.srt.entrypoints.http_server import launch_server
 
         launch_server(server_args)

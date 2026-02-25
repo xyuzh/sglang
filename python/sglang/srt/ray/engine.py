@@ -15,9 +15,7 @@
 
 from __future__ import annotations
 
-import dataclasses
 import logging
-from typing import Any, Dict, List, Optional
 
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -31,30 +29,6 @@ from sglang.srt.ray.scheduler_actor import SchedulerActor
 from sglang.srt.server_args import ZMQ_TCP_PORT_DELTA, PortArgs, ServerArgs
 
 logger = logging.getLogger(__name__)
-
-
-@dataclasses.dataclass
-class RaySchedulerInitResult(SchedulerInitResult):
-    _actors: Optional[List[Any]] = None
-    _event_loop_refs: Optional[List[Any]] = None
-
-    def wait_for_ready(self) -> None:
-        pass
-
-    def wait_for_completion(self) -> None:
-        try:
-            ray.get(self._event_loop_refs)
-        except Exception as e:
-            logger.error(f"Ray scheduler actor terminated with error: {e}")
-
-    def cleanup(self) -> None:
-        if self._actors is not None:
-            for actor in self._actors:
-                try:
-                    ray.kill(actor)
-                except Exception:
-                    pass
-            self._actors = None
 
 
 def _get_rank0_node_ip(placement_group) -> str:
@@ -186,8 +160,21 @@ class RayEngine(Engine):
 
         event_loop_refs = [actor.run_event_loop.remote() for actor in scheduler_actors]
 
-        return RaySchedulerInitResult(
+        def wait_for_completion():
+            try:
+                ray.get(event_loop_refs)
+            except Exception as e:
+                logger.error(f"Ray scheduler actor terminated with error: {e}")
+
+        def cleanup():
+            for actor in scheduler_actors:
+                try:
+                    ray.kill(actor)
+                except Exception:
+                    pass
+
+        return SchedulerInitResult(
             scheduler_infos=scheduler_infos,
-            _actors=scheduler_actors,
-            _event_loop_refs=event_loop_refs,
+            wait_for_completion=wait_for_completion,
+            cleanup=cleanup,
         )

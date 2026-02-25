@@ -26,7 +26,7 @@ def _launch_ray_subprocesses(server_args: ServerArgs):
     return launcher._launch_workers(server_args=server_args)
 
 
-def launch_ray_server(
+def launch_server(
     server_args: ServerArgs,
     execute_warmup_func: Optional[Callable] = None,
     launch_callback: Optional[Callable[[], None]] = None,

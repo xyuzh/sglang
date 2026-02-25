@@ -27,7 +27,6 @@ import random
 import signal
 import threading
 import time
-from multiprocessing.connection import Connection
 from typing import (
     Any,
     AsyncIterator,
@@ -108,44 +107,12 @@ _is_cuda = is_cuda()
 
 @dataclasses.dataclass
 class SchedulerInitResult:
-    """Base result from launching schedulers."""
+    """Result from launching schedulers."""
 
     scheduler_infos: List[Dict[str, Any]]
-
-    def wait_for_ready(self) -> None:
-        """Wait for schedulers to be ready. Default: no-op."""
-        pass
-
-    def wait_for_completion(self) -> None:
-        """Block until all schedulers terminate."""
-        raise NotImplementedError
-
-    def cleanup(self) -> None:
-        """Clean up scheduler resources. Default: no-op."""
-        pass
-
-
-@dataclasses.dataclass
-class MpSchedulerInitResult(SchedulerInitResult):
-    _procs: Optional[List[mp.Process]] = None
-    _pipe_readers: Optional[List[Connection]] = None
-
-    def wait_for_ready(self) -> None:
-        if self._procs is not None and self._pipe_readers is not None:
-            infos = _wait_for_scheduler_ready(self._pipe_readers, self._procs)
-            self.scheduler_infos.extend(infos)
-
-    def wait_for_completion(self) -> None:
-        if self._procs is not None:
-            for proc in self._procs:
-                proc.join()
-                logger.error(
-                    f"Scheduler or DataParallelController {proc.pid} "
-                    f"terminated with {proc.exitcode}"
-                )
-
-    def cleanup(self) -> None:
-        pass
+    wait_for_ready: Callable[[], None] = lambda: None
+    wait_for_completion: Callable[[], None] = lambda: None
+    cleanup: Callable[[], None] = lambda: None
 
 
 def init_tokenizer_manager(
@@ -628,10 +595,24 @@ class Engine(EngineBase):
             proc.start()
             scheduler_procs.append(proc)
 
-        return MpSchedulerInitResult(
-            scheduler_infos=[],
-            _procs=scheduler_procs,
-            _pipe_readers=scheduler_pipe_readers,
+        scheduler_infos = []
+
+        def wait_for_ready():
+            infos = _wait_for_scheduler_ready(scheduler_pipe_readers, scheduler_procs)
+            scheduler_infos.extend(infos)
+
+        def wait_for_completion():
+            for proc in scheduler_procs:
+                proc.join()
+                logger.error(
+                    f"Scheduler or DataParallelController {proc.pid} "
+                    f"terminated with {proc.exitcode}"
+                )
+
+        return SchedulerInitResult(
+            scheduler_infos=scheduler_infos,
+            wait_for_ready=wait_for_ready,
+            wait_for_completion=wait_for_completion,
         )
 
     def _launch_workers(
