@@ -221,12 +221,7 @@ class Engine(EngineBase):
             template_manager,
             port_args,
             scheduler_init_result,
-        ) = _launch_workers(
-            server_args=server_args,
-            init_tokenizer_manager_func=self.init_tokenizer_manager_func,
-            run_scheduler_process_func=self.run_scheduler_process_func,
-            run_detokenizer_process_func=self.run_detokenizer_process_func,
-        )
+        ) = self._launch_workers(server_args=server_args)
         self.tokenizer_manager = tokenizer_manager
         self.template_manager = template_manager
         self.scheduler_info = scheduler_init_result.scheduler_infos[0]
@@ -534,8 +529,184 @@ class Engine(EngineBase):
         ret = self.loop.run_until_complete(generator.__anext__())
         return ret
 
-    def _cleanup_processes(self):
-        """Clean up Ray actors, placement groups, and child processes."""
+    def _launch_scheduler_processes(
+        self, server_args: ServerArgs, port_args: PortArgs
+    ) -> SchedulerInitResult:
+        """Launch scheduler processes using multiprocessing.
+        Override in subclasses for different backends (e.g. Ray).
+        """
+        scheduler_procs = []
+
+        if server_args.dp_size == 1:
+            memory_saver_adapter = TorchMemorySaverAdapter.create(
+                enable=server_args.enable_memory_saver
+            )
+            scheduler_pipe_readers = []
+
+            pp_rank_range, tp_rank_range, pp_size_per_node, tp_size_per_node = (
+                _calculate_rank_ranges(
+                    server_args.nnodes,
+                    server_args.pp_size,
+                    server_args.tp_size,
+                    server_args.node_rank,
+                )
+            )
+
+            for pp_rank in pp_rank_range:
+                for tp_rank in tp_rank_range:
+                    reader, writer = mp.Pipe(duplex=False)
+                    gpu_id = (
+                        server_args.base_gpu_id
+                        + ((pp_rank % pp_size_per_node) * tp_size_per_node)
+                        + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
+                    )
+                    attn_dp_size = (
+                        server_args.dp_size
+                        if server_args.enable_dp_attention
+                        else 1
+                    )
+
+                    # Parallelism hierarchy (outermost to innermost):
+                    # - Attention: Global(TP) -> DP -> ATTN_CP -> ATTN_TP (innermost)
+                    # - MoE: Global(TP) -> MOE_DP -> EP -> MOE_TP (innermost)
+                    attn_tp_size = (
+                        server_args.tp_size
+                        // attn_dp_size
+                        // server_args.attn_cp_size
+                    )
+                    attn_cp_rank = (
+                        (tp_rank // attn_tp_size) % server_args.attn_cp_size
+                    )
+                    moe_dp_rank = tp_rank // (
+                        server_args.tp_size // server_args.moe_dp_size
+                    )
+                    moe_ep_rank = (
+                        tp_rank
+                        % (server_args.tp_size // server_args.moe_dp_size)
+                        // (
+                            server_args.tp_size
+                            // server_args.moe_dp_size
+                            // server_args.ep_size
+                        )
+                    )
+
+                    with maybe_reindex_device_id(gpu_id) as gpu_id:
+                        proc = mp.Process(
+                            target=self.run_scheduler_process_func,
+                            args=(
+                                server_args,
+                                port_args,
+                                gpu_id,
+                                tp_rank,
+                                attn_cp_rank,
+                                moe_dp_rank,
+                                moe_ep_rank,
+                                pp_rank,
+                                None,
+                                writer,
+                            ),
+                        )
+                        with memory_saver_adapter.configure_subprocess(), numa_utils.configure_subprocess(
+                            server_args, gpu_id
+                        ):
+                            proc.start()
+
+                    scheduler_procs.append(proc)
+                    scheduler_pipe_readers.append(reader)
+        else:
+            reader, writer = mp.Pipe(duplex=False)
+            scheduler_pipe_readers = [reader]
+            proc = mp.Process(
+                target=run_data_parallel_controller_process,
+                kwargs=dict(
+                    server_args=server_args,
+                    port_args=port_args,
+                    pipe_writer=writer,
+                    run_scheduler_process_func=self.run_scheduler_process_func,
+                ),
+            )
+            proc.start()
+            scheduler_procs.append(proc)
+
+        return MpSchedulerInitResult(
+            scheduler_infos=[],
+            _procs=scheduler_procs,
+            _pipe_readers=scheduler_pipe_readers,
+        )
+
+    def _launch_workers(
+        self, server_args: ServerArgs, port_args: Optional[PortArgs] = None
+    ) -> Tuple[TokenizerManager, TemplateManager, PortArgs, SchedulerInitResult]:
+        """Launch the TokenizerManager, Scheduler workers, and DetokenizerManager.
+
+        Returns:
+            Tuple of (tokenizer_manager, template_manager, port_args, scheduler_result).
+        """
+        configure_logger(server_args)
+        _set_envs_and_config(server_args)
+        server_args.check_server_args()
+
+        if port_args is None:
+            port_args = PortArgs.init_new(server_args)
+        logger.info(f"{server_args=}")
+
+        scheduler_result = self._launch_scheduler_processes(server_args, port_args)
+
+        if server_args.node_rank >= 1:
+            scheduler_result.wait_for_ready()
+
+            if os.getenv("SGLANG_BLOCK_NONZERO_RANK_CHILDREN") == "0":
+                return (
+                    None,
+                    None,
+                    port_args,
+                    scheduler_result,
+                )
+
+            launch_dummy_health_check_server(
+                server_args.host, server_args.port, server_args.enable_metrics
+            )
+
+            scheduler_result.wait_for_completion()
+            return (
+                None,
+                None,
+                port_args,
+                scheduler_result,
+            )
+
+        detoken_proc = mp.Process(
+            target=self.run_detokenizer_process_func,
+            args=(
+                server_args,
+                port_args,
+            ),
+        )
+        detoken_proc.start()
+
+        if server_args.tokenizer_worker_num == 1:
+            tokenizer_manager, template_manager = self.init_tokenizer_manager_func(
+                server_args, port_args
+            )
+        else:
+            tokenizer_manager = MultiTokenizerRouter(server_args, port_args)
+            template_manager = None
+
+        scheduler_result.wait_for_ready()
+
+        tokenizer_manager.max_req_input_len = scheduler_result.scheduler_infos[0][
+            "max_req_input_len"
+        ]
+
+        return (
+            tokenizer_manager,
+            template_manager,
+            port_args,
+            scheduler_result,
+        )
+
+    def _cleanup_processes(self) -> None:
+        """Clean up scheduler resources and child processes."""
         if (
             hasattr(self, "_scheduler_init_result")
             and self._scheduler_init_result is not None
@@ -543,8 +714,8 @@ class Engine(EngineBase):
             self._scheduler_init_result.cleanup()
         kill_process_tree(os.getpid(), include_parent=False)
 
-    def _atexit_shutdown(self):
-        """Atexit handler - cleans up Ray actors and child processes."""
+    def _atexit_shutdown(self) -> None:
+        """Atexit handler - cleans up scheduler resources and child processes."""
         if self._shutdown_called:
             return
         self._shutdown_called = True
@@ -1036,28 +1207,6 @@ def _wait_for_scheduler_ready(
     return scheduler_infos
 
 
-def _launch_scheduler_processes(
-    server_args: ServerArgs,
-    port_args: PortArgs,
-    run_scheduler_process_func: Callable,
-) -> SchedulerInitResult:
-    """Launch schedulers using Ray actors or mp.Process.
-
-    Returns:
-        SchedulerInitResult that abstracts the mode-specific details.
-        For Ray mode, scheduler_infos is already populated.
-        For mp mode, call result.wait_for_ready() to populate scheduler_infos.
-    """
-    if server_args.use_ray:
-        from sglang.srt.ray.launch import launch_scheduler_ray_actors
-
-        return launch_scheduler_ray_actors(server_args, port_args)
-    else:
-        return _launch_scheduler_processes_mp(
-            server_args, port_args, run_scheduler_process_func
-        )
-
-
 def _calculate_rank_ranges(
     nnodes: int, pp_size: int, tp_size: int, node_rank: int
 ) -> Tuple[range, range, int, int]:
@@ -1093,118 +1242,11 @@ def _calculate_rank_ranges(
     return pp_rank_range, tp_rank_range, pp_size_per_node, tp_size_per_node
 
 
-def _launch_scheduler_processes_mp(
+def _launch_subprocesses(
     server_args: ServerArgs,
-    port_args: PortArgs,
-    run_scheduler_process_func: Callable,
-) -> MpSchedulerInitResult:
-    """Launch scheduler processes using multiprocessing.
-
-    Returns:
-        MpSchedulerInitResult with _procs and _pipe_readers set.
-        scheduler_infos will be empty; call result.wait_for_ready() to populate it.
-    """
-    scheduler_procs = []
-
-    if server_args.dp_size == 1:
-        # Launch tensor parallel scheduler processes
-        memory_saver_adapter = TorchMemorySaverAdapter.create(
-            enable=server_args.enable_memory_saver
-        )
-        scheduler_pipe_readers = []
-
-        pp_rank_range, tp_rank_range, pp_size_per_node, tp_size_per_node = (
-            _calculate_rank_ranges(
-                server_args.nnodes,
-                server_args.pp_size,
-                server_args.tp_size,
-                server_args.node_rank,
-            )
-        )
-
-        for pp_rank in pp_rank_range:
-            for tp_rank in tp_rank_range:
-                reader, writer = mp.Pipe(duplex=False)
-                gpu_id = (
-                    server_args.base_gpu_id
-                    + ((pp_rank % pp_size_per_node) * tp_size_per_node)
-                    + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
-                )
-                attn_dp_size = (
-                    server_args.dp_size if server_args.enable_dp_attention else 1
-                )
-
-                # Parallelism hierarchy (outermost to innermost):
-                # - Attention: Global(TP) -> DP -> ATTN_CP -> ATTN_TP (innermost)
-                # - MoE: Global(TP) -> MOE_DP -> EP -> MOE_TP (innermost)
-                attn_tp_size = (
-                    server_args.tp_size // attn_dp_size // server_args.attn_cp_size
-                )
-                attn_cp_rank = (tp_rank // attn_tp_size) % server_args.attn_cp_size
-                moe_dp_rank = tp_rank // (
-                    server_args.tp_size // server_args.moe_dp_size
-                )
-                moe_ep_rank = (
-                    tp_rank
-                    % (server_args.tp_size // server_args.moe_dp_size)
-                    // (
-                        server_args.tp_size
-                        // server_args.moe_dp_size
-                        // server_args.ep_size
-                    )
-                )
-
-                with maybe_reindex_device_id(gpu_id) as gpu_id:
-                    proc = mp.Process(
-                        target=run_scheduler_process_func,
-                        args=(
-                            server_args,
-                            port_args,
-                            gpu_id,
-                            tp_rank,
-                            attn_cp_rank,
-                            moe_dp_rank,
-                            moe_ep_rank,
-                            pp_rank,
-                            None,
-                            writer,
-                        ),
-                    )
-                    with memory_saver_adapter.configure_subprocess(), numa_utils.configure_subprocess(
-                        server_args, gpu_id
-                    ):
-                        proc.start()
-
-                scheduler_procs.append(proc)
-                scheduler_pipe_readers.append(reader)
-    else:
-        # Launch the data parallel controller
-        reader, writer = mp.Pipe(duplex=False)
-        scheduler_pipe_readers = [reader]
-        proc = mp.Process(
-            target=run_data_parallel_controller_process,
-            kwargs=dict(
-                server_args=server_args,
-                port_args=port_args,
-                pipe_writer=writer,
-                run_scheduler_process_func=run_scheduler_process_func,
-            ),
-        )
-        proc.start()
-        scheduler_procs.append(proc)
-
-    return MpSchedulerInitResult(
-        scheduler_infos=[],
-        _procs=scheduler_procs,
-        _pipe_readers=scheduler_pipe_readers,
-    )
-
-
-def _launch_workers(
-    server_args: ServerArgs,
-    init_tokenizer_manager_func: Callable,
-    run_scheduler_process_func: Callable,
-    run_detokenizer_process_func: Callable,
+    init_tokenizer_manager_func: Callable = None,
+    run_scheduler_process_func: Callable = None,
+    run_detokenizer_process_func: Callable = None,
     port_args: Optional[PortArgs] = None,
 ) -> Tuple[
     TokenizerManager,

@@ -67,7 +67,7 @@ from sglang.srt.entrypoints.anthropic.protocol import (
 )
 from sglang.srt.entrypoints.anthropic.serving import AnthropicServing
 from sglang.srt.entrypoints.engine import (
-    _launch_workers,
+    _launch_subprocesses,
     init_tokenizer_manager,
     run_detokenizer_process,
     run_scheduler_process,
@@ -1952,50 +1952,23 @@ def _wait_weights_ready():
     )
 
 
-def launch_server(
+def _setup_and_run_http_server(
     server_args: ServerArgs,
-    init_tokenizer_manager_func: Callable = init_tokenizer_manager,
-    run_scheduler_process_func: Callable = run_scheduler_process,
-    run_detokenizer_process_func: Callable = run_detokenizer_process,
+    tokenizer_manager,
+    template_manager,
+    port_args: PortArgs,
+    scheduler_infos: List[Dict],
     execute_warmup_func: Callable = _execute_server_warmup,
     launch_callback: Optional[Callable[[], None]] = None,
 ):
+    """Set global state, configure middleware, and run uvicorn.
+
+    Shared by mp launch_server() and ray/http_server.launch_ray_server().
     """
-    Launch SRT (SGLang Runtime) Server.
-
-    The SRT server consists of an HTTP server and an SRT engine.
-
-    - HTTP server: A FastAPI server that routes requests to the engine.
-    - The engine consists of three components:
-        1. TokenizerManager: Tokenizes the requests and sends them to the scheduler.
-        2. Scheduler (subprocess): Receives requests from the Tokenizer Manager, schedules batches, forwards them, and sends the output tokens to the Detokenizer Manager.
-        3. DetokenizerManager (subprocess): Detokenizes the output tokens and sends the result back to the Tokenizer Manager.
-
-    Note:
-    1. The HTTP server, Engine, and TokenizerManager all run in the main process.
-    2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
-    """
-    # Launch subprocesses
-    (
-        tokenizer_manager,
-        template_manager,
-        port_args,
-        scheduler_result,
-    ) = _launch_workers(
-        server_args=server_args,
-        init_tokenizer_manager_func=init_tokenizer_manager_func,
-        run_scheduler_process_func=run_scheduler_process_func,
-        run_detokenizer_process_func=run_detokenizer_process_func,
-    )
-
-    scheduler_infos = scheduler_result.scheduler_infos
-
-    # Parse info got from the schedulers
     remote_instance_transfer_engine_info = (
         parse_remote_instance_transfer_engine_info_from_scheduler_infos(scheduler_infos)
     )
 
-    # Set global states
     set_global_state(
         _GlobalState(
             tokenizer_manager=tokenizer_manager,
@@ -2008,10 +1981,7 @@ def launch_server(
     if server_args.enable_metrics:
         add_prometheus_track_response_middleware(app)
 
-    # Pass additional arguments to the lifespan function.
-    # They will be used for additional initialization setups.
     if server_args.tokenizer_worker_num == 1:
-        # If it is single tokenizer mode, we can pass the arguments by attributes of the app object.
         app.is_single_tokenizer_mode = True
         app.server_args = server_args
         app.warmup_thread_kwargs = dict(
@@ -2020,13 +1990,6 @@ def launch_server(
             execute_warmup_func=execute_warmup_func,
         )
 
-        # Add api key authorization
-        # This is only supported in single tokenizer mode.
-        #
-        # Backward compatibility:
-        # - api_key only: behavior matches legacy (all endpoints require api_key)
-        # - no keys: legacy had no restriction; ADMIN_FORCE endpoints must still be rejected when
-        #   admin_api_key is not configured.
         if (
             server_args.api_key
             or server_args.admin_api_key
@@ -2040,20 +2003,15 @@ def launch_server(
                 admin_api_key=server_args.admin_api_key,
             )
     else:
-        # If it is multi-tokenizer mode, we need to write the arguments to shared memory
-        # for other worker processes to read.
         app.is_single_tokenizer_mode = False
         multi_tokenizer_args_shm = write_data_for_multi_tokenizer(
             port_args, server_args, scheduler_infos[0]
         )
 
     try:
-        # Update logging configs
         set_uvicorn_logging_configs(server_args)
 
-        # Listen for HTTP requests
         if server_args.tokenizer_worker_num == 1:
-            # Default case, one tokenizer process
             uvicorn.run(
                 app,
                 host=server_args.host,
@@ -2064,7 +2022,6 @@ def launch_server(
                 loop="uvloop",
             )
         else:
-            # Multiple tokenizer and http processes
             from uvicorn.config import LOGGING_CONFIG
 
             LOGGING_CONFIG["loggers"]["sglang.srt.entrypoints.http_server"] = {
@@ -2088,3 +2045,49 @@ def launch_server(
         if server_args.tokenizer_worker_num > 1:
             multi_tokenizer_args_shm.unlink()
             _global_state.tokenizer_manager.socket_mapping.clear_all_sockets()
+
+
+def launch_server(
+    server_args: ServerArgs,
+    init_tokenizer_manager_func: Callable = init_tokenizer_manager,
+    run_scheduler_process_func: Callable = run_scheduler_process,
+    run_detokenizer_process_func: Callable = run_detokenizer_process,
+    execute_warmup_func: Callable = _execute_server_warmup,
+    launch_callback: Optional[Callable[[], None]] = None,
+):
+    """
+    Launch SRT (SGLang Runtime) Server.
+
+    The SRT server consists of an HTTP server and an SRT engine.
+
+    - HTTP server: A FastAPI server that routes requests to the engine.
+    - The engine consists of three components:
+        1. TokenizerManager: Tokenizes the requests and sends them to the scheduler.
+        2. Scheduler (subprocess): Receives requests from the Tokenizer Manager, schedules batches, forwards them, and sends the output tokens to the Detokenizer Manager.
+        3. DetokenizerManager (subprocess): Detokenizes the output tokens and sends the result back to the Tokenizer Manager.
+
+    Note:
+    1. The HTTP server, Engine, and TokenizerManager all run in the main process.
+    2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
+    """
+    (
+        tokenizer_manager,
+        template_manager,
+        port_args,
+        scheduler_result,
+    ) = _launch_subprocesses(
+        server_args=server_args,
+        init_tokenizer_manager_func=init_tokenizer_manager_func,
+        run_scheduler_process_func=run_scheduler_process_func,
+        run_detokenizer_process_func=run_detokenizer_process_func,
+    )
+
+    _setup_and_run_http_server(
+        server_args,
+        tokenizer_manager,
+        template_manager,
+        port_args,
+        scheduler_result.scheduler_infos,
+        execute_warmup_func=execute_warmup_func,
+        launch_callback=launch_callback,
+    )
