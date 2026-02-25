@@ -177,10 +177,7 @@ class Engine(EngineBase):
         logger.info(f"{server_args=}")
 
         # Shutdown the subprocesses automatically when the program exits
-        # Store the atexit function so we can unregister it later
-        self._shutdown_called = False
-        self._atexit_handler = lambda: self._atexit_shutdown()
-        atexit.register(self._atexit_handler)
+        atexit.register(self.shutdown)
 
         # Launch subprocesses
         (
@@ -193,7 +190,6 @@ class Engine(EngineBase):
         self.template_manager = template_manager
         self.scheduler_info = scheduler_init_result.scheduler_infos[0]
         self.port_args = port_args
-        self._scheduler_init_result = scheduler_init_result
         self.remote_instance_transfer_engine_info = (
             parse_remote_instance_transfer_engine_info_from_scheduler_infos(
                 scheduler_init_result.scheduler_infos
@@ -686,35 +682,9 @@ class Engine(EngineBase):
             scheduler_result,
         )
 
-    def _cleanup_processes(self) -> None:
-        """Clean up scheduler resources and child processes."""
-        if (
-            hasattr(self, "_scheduler_init_result")
-            and self._scheduler_init_result is not None
-        ):
-            self._scheduler_init_result.cleanup()
-        kill_process_tree(os.getpid(), include_parent=False)
-
-    def _atexit_shutdown(self) -> None:
-        """Atexit handler - cleans up scheduler resources and child processes."""
-        if self._shutdown_called:
-            return
-        self._shutdown_called = True
-        self._cleanup_processes()
-
     def shutdown(self):
-        """Shutdown the engine."""
-        if self._shutdown_called:
-            return
-        self._shutdown_called = True
-
-        # Unregister atexit handler since we're shutting down explicitly
-        try:
-            atexit.unregister(self._atexit_handler)
-        except Exception:
-            pass
-
-        self._cleanup_processes()
+        """Shutdown the engine"""
+        kill_process_tree(os.getpid(), include_parent=False)
 
     def __enter__(self):
         return self

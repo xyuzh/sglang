@@ -1963,7 +1963,7 @@ def _setup_and_run_http_server(
 ):
     """Set global state, configure middleware, and run uvicorn.
 
-    Shared by mp launch_server() and ray/http_server.launch_ray_server().
+    Shared by mp launch_server() and ray/http_server.launch_server().
     """
     remote_instance_transfer_engine_info = (
         parse_remote_instance_transfer_engine_info_from_scheduler_infos(scheduler_infos)
