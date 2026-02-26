@@ -323,12 +323,106 @@ def monitor_trace_file(known_files, directory, interval=1):
             break
 
 
+def _create_ray_engine_backend(server_args: ServerArgs):
+    """Create a RayEngine inside a Ray actor on a placement group.
+
+    RayEngine requires a placement group, so we launch it inside a Ray actor
+    and return a lightweight proxy that forwards generate/shutdown calls.
+    """
+    import ray
+    from ray.runtime_env import RuntimeEnv
+    from ray.util.placement_group import placement_group
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
+    env_vars = {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}
+    if os.environ.get("HF_TOKEN"):
+        env_vars["HF_TOKEN"] = os.environ["HF_TOKEN"]
+
+    if not ray.is_initialized():
+        ray.init(runtime_env=RuntimeEnv(env_vars=env_vars))
+
+    total_gpus = server_args.tp_size * server_args.pp_size
+
+    @ray.remote
+    class _EngineActor:
+        def __init__(self, **kwargs):
+            from sglang.srt.ray.engine import RayEngine
+
+            self.engine = RayEngine(**kwargs)
+
+        def generate(self, **kwargs):
+            return self.engine.generate(**kwargs)
+
+        def get_server_info(self):
+            return self.engine.get_server_info()
+
+        def start_profile(self):
+            return self.engine.start_profile()
+
+        def stop_profile(self):
+            return self.engine.stop_profile()
+
+        def shutdown(self):
+            if self.engine:
+                self.engine.shutdown()
+                self.engine = None
+
+    pg = placement_group(
+        [{"CPU": 1, "GPU": total_gpus}],
+        strategy="STRICT_PACK",
+    )
+    ray.get(pg.ready())
+
+    actor = _EngineActor.options(
+        num_cpus=1,
+        num_gpus=0,
+        scheduling_strategy=PlacementGroupSchedulingStrategy(
+            placement_group=pg,
+            placement_group_bundle_index=0,
+        ),
+    ).remote(**dataclasses.asdict(server_args))
+
+    class _RayEngineProxy:
+        """Proxy that forwards calls to RayEngine running in a Ray actor."""
+
+        def __init__(self, actor, pg):
+            self._actor = actor
+            self._pg = pg
+
+        def generate(self, **kwargs):
+            return ray.get(self._actor.generate.remote(**kwargs))
+
+        def get_server_info(self):
+            return ray.get(self._actor.get_server_info.remote())
+
+        def start_profile(self):
+            return ray.get(self._actor.start_profile.remote())
+
+        def stop_profile(self):
+            return ray.get(self._actor.stop_profile.remote())
+
+        def shutdown(self):
+            try:
+                ray.get(self._actor.shutdown.remote(), timeout=60)
+            except Exception:
+                pass
+            try:
+                ray.util.remove_placement_group(self._pg)
+            except Exception:
+                pass
+
+    return _RayEngineProxy(actor, pg)
+
+
 def throughput_test(
     server_args: ServerArgs,
     bench_args: BenchArgs,
 ):
     if bench_args.backend == "engine":
-        backend = Engine(**dataclasses.asdict(server_args))
+        if server_args.use_ray:
+            backend = _create_ray_engine_backend(server_args)
+        else:
+            backend = Engine(**dataclasses.asdict(server_args))
         if not backend:
             raise ValueError("Please provide valid engine arguments")
     elif bench_args.backend == "runtime":
