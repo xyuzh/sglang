@@ -112,7 +112,6 @@ class SchedulerInitResult:
     scheduler_infos: List[Dict[str, Any]]
     wait_for_ready: Callable[[], None] = lambda: None
     wait_for_completion: Callable[[], None] = lambda: None
-    cleanup: Callable[[], None] = lambda: None
 
 
 def init_tokenizer_manager(

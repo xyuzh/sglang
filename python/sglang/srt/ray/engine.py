@@ -160,15 +160,7 @@ class RayEngine(Engine):
             except Exception as e:
                 logger.error(f"Ray scheduler actor terminated with error: {e}")
 
-        def cleanup():
-            for actor in scheduler_actors:
-                try:
-                    ray.kill(actor)
-                except Exception:
-                    pass
-
         return SchedulerInitResult(
             scheduler_infos=scheduler_infos,
             wait_for_completion=wait_for_completion,
-            cleanup=cleanup,
         )
