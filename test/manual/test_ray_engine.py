@@ -13,10 +13,12 @@ Usage:
 
     # 2-GPU tests
     python -m pytest test/manual/test_ray_engine.py::TestRayEngineOfflineTP2 -v -s
+    python -m pytest test/manual/test_ray_engine.py::TestRayEngineOfflinePP2 -v -s
 """
 
 from __future__ import annotations
 
+import os
 import time
 import unittest
 
@@ -24,14 +26,25 @@ import torch
 
 from sglang.test.test_utils import DEFAULT_SMALL_MODEL_NAME_FOR_TEST
 
+# Allow overriding the model via env var for environments without gated access
+_MODEL = os.environ.get("SGLANG_TEST_MODEL", DEFAULT_SMALL_MODEL_NAME_FOR_TEST)
+
 try:
     import ray
+    from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import placement_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+    # Prevent Ray from overriding CUDA_VISIBLE_DEVICES so that all GPUs
+    # remain visible inside actors regardless of num_gpus allocation.
+    _env_vars = {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}
+    if os.environ.get("HF_TOKEN"):
+        _env_vars["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    _RAY_RUNTIME_ENV = RuntimeEnv(env_vars=_env_vars)
     _has_ray = True
 except ImportError:
     _has_ray = False
+    _RAY_RUNTIME_ENV = None
 
 
 _NUM_GPUS = torch.cuda.device_count()
@@ -51,7 +64,7 @@ _PROMPTS = [
 # ---------------------------------------------------------------------------
 
 
-def _create_engine_on_pg(tp_size, model=DEFAULT_SMALL_MODEL_NAME_FOR_TEST, extra_kwargs=None):
+def _create_engine_on_pg(tp_size, pp_size=1, model=_MODEL, extra_kwargs=None):
     """Create an EngineActor on a placement group and wait for it to be ready.
 
     Returns (engine_actor, placement_group).
@@ -60,25 +73,24 @@ def _create_engine_on_pg(tp_size, model=DEFAULT_SMALL_MODEL_NAME_FOR_TEST, extra
     @ray.remote
     class EngineActor:
         def __init__(self, **kwargs):
-            from sglang import Engine
+            from sglang.srt.ray.engine import RayEngine
 
-            self.engine = Engine(**kwargs)
+            self.engine = RayEngine(**kwargs)
 
         def is_ready(self):
             return True
 
         def generate(self, prompt, sampling_params):
-            return self.engine.generate(
-                prompt=prompt, sampling_params=sampling_params
-            )
+            return self.engine.generate(prompt=prompt, sampling_params=sampling_params)
 
         def shutdown(self):
             if self.engine:
                 self.engine.shutdown()
                 self.engine = None
 
+    total_gpus = tp_size * pp_size
     pg = placement_group(
-        [{"CPU": 1, "GPU": tp_size}],
+        [{"CPU": 1, "GPU": total_gpus}],
         strategy="STRICT_PACK",
     )
     ray.get(pg.ready())
@@ -86,7 +98,7 @@ def _create_engine_on_pg(tp_size, model=DEFAULT_SMALL_MODEL_NAME_FOR_TEST, extra
     kwargs = dict(
         model_path=model,
         tp_size=tp_size,
-        use_ray=True,
+        pp_size=pp_size,
     )
     if extra_kwargs:
         kwargs.update(extra_kwargs)
@@ -128,7 +140,7 @@ class TestRayEngineOfflineTP1(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not ray.is_initialized():
-            ray.init(log_to_driver=True)
+            ray.init(log_to_driver=True, runtime_env=_RAY_RUNTIME_ENV)
         cls.actor, cls.pg = _create_engine_on_pg(tp_size=1)
 
     @classmethod
@@ -146,9 +158,7 @@ class TestRayEngineOfflineTP1(unittest.TestCase):
 
     def test_batch_generate(self):
         for prompt in _PROMPTS:
-            result = ray.get(
-                self.actor.generate.remote(prompt, _SAMPLING_PARAMS)
-            )
+            result = ray.get(self.actor.generate.remote(prompt, _SAMPLING_PARAMS))
             self.assertIn("text", result)
             self.assertGreater(len(result["text"]), 0, f"Empty output for: {prompt}")
 
@@ -171,7 +181,7 @@ class TestRayEngineOfflineTP2(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not ray.is_initialized():
-            ray.init(log_to_driver=True)
+            ray.init(log_to_driver=True, runtime_env=_RAY_RUNTIME_ENV)
         cls.actor, cls.pg = _create_engine_on_pg(tp_size=2)
 
     @classmethod
@@ -189,9 +199,42 @@ class TestRayEngineOfflineTP2(unittest.TestCase):
 
     def test_batch_generate_tp2(self):
         for prompt in _PROMPTS:
-            result = ray.get(
-                self.actor.generate.remote(prompt, _SAMPLING_PARAMS)
-            )
+            result = ray.get(self.actor.generate.remote(prompt, _SAMPLING_PARAMS))
+            self.assertIn("text", result)
+            self.assertGreater(len(result["text"]), 0, f"Empty output for: {prompt}")
+
+
+# ---------------------------------------------------------------------------
+# Tests: Offline PP=2
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_has_ray, "ray is not installed")
+@unittest.skipUnless(_NUM_GPUS >= 2, "requires at least 2 GPUs")
+class TestRayEngineOfflinePP2(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        if not ray.is_initialized():
+            ray.init(log_to_driver=True, runtime_env=_RAY_RUNTIME_ENV)
+        cls.actor, cls.pg = _create_engine_on_pg(tp_size=1, pp_size=2)
+
+    @classmethod
+    def tearDownClass(cls):
+        _cleanup(cls.actor, cls.pg)
+        ray.shutdown()
+
+    def test_offline_generate_pp2(self):
+        result = ray.get(
+            self.actor.generate.remote("The capital of France is", _SAMPLING_PARAMS)
+        )
+        self.assertIn("text", result)
+        self.assertGreater(len(result["text"]), 0)
+        print(f"Generated (PP=2): {result['text'][:200]}")
+
+    def test_batch_generate_pp2(self):
+        for prompt in _PROMPTS:
+            result = ray.get(self.actor.generate.remote(prompt, _SAMPLING_PARAMS))
             self.assertIn("text", result)
             self.assertGreater(len(result["text"]), 0, f"Empty output for: {prompt}")
 
@@ -208,7 +251,7 @@ class TestRayEngineErrors(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not ray.is_initialized():
-            ray.init(log_to_driver=True)
+            ray.init(log_to_driver=True, runtime_env=_RAY_RUNTIME_ENV)
 
     @classmethod
     def tearDownClass(cls):
@@ -224,9 +267,10 @@ class TestRayEngineErrors(unittest.TestCase):
 
                 try:
                     RayEngine(
-                        model_path=DEFAULT_SMALL_MODEL_NAME_FOR_TEST,
+                        model_path=_MODEL,
                         tp_size=1,
                         dp_size=2,
+                        use_ray=True,
                     )
                     return None
                 except (NotImplementedError, RuntimeError) as e:
@@ -260,8 +304,9 @@ class TestRayEngineErrors(unittest.TestCase):
 
             try:
                 RayEngine(
-                    model_path=DEFAULT_SMALL_MODEL_NAME_FOR_TEST,
+                    model_path=_MODEL,
                     tp_size=1,
+                    use_ray=True,
                 )
                 return None
             except RuntimeError as e:
@@ -293,7 +338,7 @@ class TestRayHTTPServerTP1(unittest.TestCase):
         import requests as req_lib
 
         if not ray.is_initialized():
-            ray.init(log_to_driver=True)
+            ray.init(log_to_driver=True, runtime_env=_RAY_RUNTIME_ENV)
 
         cls.port = 30100
         cls.pg = placement_group(
@@ -312,15 +357,13 @@ class TestRayHTTPServerTP1(unittest.TestCase):
         def _get_ip():
             return ray.util.get_node_ip_address()
 
-        cls.node_ip = ray.get(
-            _get_ip.options(scheduling_strategy=pg_strategy).remote()
-        )
+        cls.node_ip = ray.get(_get_ip.options(scheduling_strategy=pg_strategy).remote())
         cls.base_url = f"http://{cls.node_ip}:{cls.port}"
 
         # Launch server as a Ray task (blocks until server exits)
         @ray.remote
         def _launch(**kwargs):
-            from sglang.srt.entrypoints.http_server import launch_server
+            from sglang.srt.ray.http_server import launch_server
             from sglang.srt.server_args import ServerArgs
 
             launch_server(ServerArgs(**kwargs))
@@ -330,7 +373,7 @@ class TestRayHTTPServerTP1(unittest.TestCase):
             num_gpus=0,
             scheduling_strategy=pg_strategy,
         ).remote(
-            model_path=DEFAULT_SMALL_MODEL_NAME_FOR_TEST,
+            model_path=_MODEL,
             tp_size=1,
             port=cls.port,
             host="0.0.0.0",
@@ -359,9 +402,7 @@ class TestRayHTTPServerTP1(unittest.TestCase):
 
         if not healthy:
             ray.cancel(cls.server_ref, force=True)
-            raise RuntimeError(
-                f"Server did not become healthy within {timeout}s"
-            )
+            raise RuntimeError(f"Server did not become healthy within {timeout}s")
 
     @classmethod
     def tearDownClass(cls):
@@ -413,9 +454,7 @@ class TestRayHTTPServerTP1(unittest.TestCase):
             resp.raise_for_status()
             data = resp.json()
             self.assertIn("text", data)
-            self.assertGreater(
-                len(data["text"]), 0, f"Empty output for: {prompt}"
-            )
+            self.assertGreater(len(data["text"]), 0, f"Empty output for: {prompt}")
 
 
 if __name__ == "__main__":

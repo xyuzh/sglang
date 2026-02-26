@@ -29,7 +29,13 @@ def run_server(server_args):
 
         asyncio.run(serve_grpc(server_args))
     elif server_args.use_ray:
-        from sglang.srt.ray.http_server import launch_server
+        try:
+            from sglang.srt.ray.http_server import launch_server
+        except ImportError:
+            raise ImportError(
+                "Ray is required for --use-ray mode. "
+                "Install it with: pip install 'sglang[ray]'"
+            )
 
         launch_server(server_args)
     else:
