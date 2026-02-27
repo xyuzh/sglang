@@ -59,7 +59,10 @@ class RayEngine(Engine):
 
     @classmethod
     def _launch_scheduler_processes(
-        cls, server_args: ServerArgs, port_args: PortArgs, run_scheduler_process_func: Callable
+        cls,
+        server_args: ServerArgs,
+        port_args: PortArgs,
+        run_scheduler_process_func: Callable,
     ) -> SchedulerInitResult:
         """Launch schedulers as Ray actors."""
         if server_args.dp_size > 1:
