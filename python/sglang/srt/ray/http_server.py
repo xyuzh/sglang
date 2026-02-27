@@ -20,10 +20,19 @@ from sglang.srt.server_args import ServerArgs
 
 def _launch_ray_subprocesses(server_args: ServerArgs):
     """Launch subprocesses using RayEngine (Ray actor scheduler backend)."""
+    from sglang.srt.entrypoints.engine import (
+        init_tokenizer_manager,
+        run_detokenizer_process,
+        run_scheduler_process,
+    )
     from sglang.srt.ray.engine import RayEngine
 
-    launcher = object.__new__(RayEngine)
-    return launcher._launch_workers(server_args=server_args)
+    return RayEngine._launch_workers(
+        server_args=server_args,
+        init_tokenizer_manager_func=init_tokenizer_manager,
+        run_scheduler_process_func=run_scheduler_process,
+        run_detokenizer_process_func=run_detokenizer_process,
+    )
 
 
 def launch_server(

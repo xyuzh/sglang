@@ -184,7 +184,12 @@ class Engine(EngineBase):
             template_manager,
             port_args,
             scheduler_init_result,
-        ) = self._launch_workers(server_args=server_args)
+        ) = self._launch_workers(
+            server_args=server_args,
+            init_tokenizer_manager_func=self.init_tokenizer_manager_func,
+            run_scheduler_process_func=self.run_scheduler_process_func,
+            run_detokenizer_process_func=self.run_detokenizer_process_func,
+        )
         self.tokenizer_manager = tokenizer_manager
         self.template_manager = template_manager
         self.scheduler_info = scheduler_init_result.scheduler_infos[0]
@@ -491,8 +496,12 @@ class Engine(EngineBase):
         ret = self.loop.run_until_complete(generator.__anext__())
         return ret
 
+    @classmethod
     def _launch_scheduler_processes(
-        self, server_args: ServerArgs, port_args: PortArgs
+        cls,
+        server_args: ServerArgs,
+        port_args: PortArgs,
+        run_scheduler_process_func: Callable,
     ) -> SchedulerInitResult:
         """Launch scheduler processes using multiprocessing.
         Override in subclasses for different backends (e.g. Ray).
@@ -548,7 +557,7 @@ class Engine(EngineBase):
 
                     with maybe_reindex_device_id(gpu_id) as gpu_id:
                         proc = mp.Process(
-                            target=self.run_scheduler_process_func,
+                            target=run_scheduler_process_func,
                             args=(
                                 server_args,
                                 port_args,
@@ -578,7 +587,7 @@ class Engine(EngineBase):
                     server_args=server_args,
                     port_args=port_args,
                     pipe_writer=writer,
-                    run_scheduler_process_func=self.run_scheduler_process_func,
+                    run_scheduler_process_func=run_scheduler_process_func,
                 ),
             )
             proc.start()
@@ -604,8 +613,14 @@ class Engine(EngineBase):
             wait_for_completion=wait_for_completion,
         )
 
+    @classmethod
     def _launch_workers(
-        self, server_args: ServerArgs, port_args: Optional[PortArgs] = None
+        cls,
+        server_args: ServerArgs,
+        init_tokenizer_manager_func: Callable,
+        run_scheduler_process_func: Callable,
+        run_detokenizer_process_func: Callable,
+        port_args: Optional[PortArgs] = None,
     ) -> Tuple[TokenizerManager, TemplateManager, PortArgs, SchedulerInitResult]:
         """Launch the TokenizerManager, Scheduler workers, and DetokenizerManager.
 
@@ -620,7 +635,15 @@ class Engine(EngineBase):
             port_args = PortArgs.init_new(server_args)
         logger.info(f"{server_args=}")
 
-        scheduler_result = self._launch_scheduler_processes(server_args, port_args)
+        scheduler_result = cls._launch_scheduler_processes(
+            server_args, port_args, run_scheduler_process_func
+        )
+
+        if (
+            server_args.enable_elastic_expert_backup
+            and server_args.elastic_ep_backend is not None
+        ):
+            run_expert_backup_manager(server_args, port_args)
 
         if server_args.node_rank >= 1:
             scheduler_result.wait_for_ready()
@@ -646,7 +669,7 @@ class Engine(EngineBase):
             )
 
         detoken_proc = mp.Process(
-            target=self.run_detokenizer_process_func,
+            target=run_detokenizer_process_func,
             args=(
                 server_args,
                 port_args,
@@ -655,7 +678,7 @@ class Engine(EngineBase):
         detoken_proc.start()
 
         if server_args.tokenizer_worker_num == 1:
-            tokenizer_manager, template_manager = self.init_tokenizer_manager_func(
+            tokenizer_manager, template_manager = init_tokenizer_manager_func(
                 server_args, port_args
             )
         else:
@@ -1188,9 +1211,9 @@ def _calculate_rank_ranges(
 
 def _launch_subprocesses(
     server_args: ServerArgs,
-    init_tokenizer_manager_func: Callable = None,
-    run_scheduler_process_func: Callable = None,
-    run_detokenizer_process_func: Callable = None,
+    init_tokenizer_manager_func: Callable,
+    run_scheduler_process_func: Callable,
+    run_detokenizer_process_func: Callable,
     port_args: Optional[PortArgs] = None,
 ) -> Tuple[
     TokenizerManager,
@@ -1198,96 +1221,11 @@ def _launch_subprocesses(
     PortArgs,
     SchedulerInitResult,
 ]:
-    """
-    Launch the TokenizerManager in the main process, the Scheduler workers (as subprocesses
-    or Ray actors), and the DetokenizerManager in another subprocess.
-
-    Returns:
-        Tuple of (tokenizer_manager, template_manager, port_args, scheduler_result).
-    """
-    # Configure global environment
-    configure_logger(server_args)
-    _set_envs_and_config(server_args)
-    server_args.check_server_args()
-
-    # Allocate ports for inter-process communications
-    if port_args is None:
-        port_args = PortArgs.init_new(server_args)
-    logger.info(f"{server_args=}")
-
-    # Launch schedulers (unified interface for both mp and Ray modes)
-    scheduler_result = _launch_scheduler_processes(
+    """Module-level launcher used by http_server.py."""
+    return Engine._launch_workers(
         server_args=server_args,
-        port_args=port_args,
+        init_tokenizer_manager_func=init_tokenizer_manager_func,
         run_scheduler_process_func=run_scheduler_process_func,
-    )
-
-    if (
-        server_args.enable_elastic_expert_backup
-        and server_args.elastic_ep_backend is not None
-    ):
-        run_expert_backup_manager(server_args, port_args)
-
-    if server_args.node_rank >= 1:
-        # In multi-node cases, non-zero rank nodes do not need to run tokenizer or detokenizer,
-        # so they can just wait here.
-
-        # Wait for schedulers to be ready (no-op for Ray, waits for pipe in mp mode)
-        scheduler_result.wait_for_ready()
-
-        if os.getenv("SGLANG_BLOCK_NONZERO_RANK_CHILDREN") == "0":
-            # When using `Engine` as a Python API, we don't want to block here.
-            return (
-                None,
-                None,
-                port_args,
-                scheduler_result,
-            )
-
-        launch_dummy_health_check_server(
-            server_args.host, server_args.port, server_args.enable_metrics
-        )
-
-        # Wait for schedulers to terminate (they shouldn't normally)
-        scheduler_result.wait_for_completion()
-        return (
-            None,
-            None,
-            port_args,
-            scheduler_result,
-        )
-
-    # Launch detokenizer process
-    detoken_proc = mp.Process(
-        target=run_detokenizer_process_func,
-        args=(
-            server_args,
-            port_args,
-        ),
-    )
-    detoken_proc.start()
-
-    # Init tokenizer manager first, as the bootstrap server is initialized here
-    if server_args.tokenizer_worker_num == 1:
-        tokenizer_manager, template_manager = init_tokenizer_manager_func(
-            server_args, port_args
-        )
-    else:
-        # Launch multi-tokenizer router
-        tokenizer_manager = MultiTokenizerRouter(server_args, port_args)
-        template_manager = None
-
-    # Wait for the model to finish loading (no-op for Ray, waits for pipe in mp mode)
-    scheduler_result.wait_for_ready()
-
-    # Get back some info from scheduler to tokenizer_manager
-    tokenizer_manager.max_req_input_len = scheduler_result.scheduler_infos[0][
-        "max_req_input_len"
-    ]
-
-    return (
-        tokenizer_manager,
-        template_manager,
-        port_args,
-        scheduler_result,
+        run_detokenizer_process_func=run_detokenizer_process_func,
+        port_args=port_args,
     )

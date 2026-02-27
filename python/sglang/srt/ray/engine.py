@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Callable
 
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -56,8 +57,9 @@ def _get_rank0_node_ip(placement_group) -> str:
 class RayEngine(Engine):
     """Engine using Ray actors for scheduler processes."""
 
+    @classmethod
     def _launch_scheduler_processes(
-        self, server_args: ServerArgs, port_args: PortArgs
+        cls, server_args: ServerArgs, port_args: PortArgs, run_scheduler_process_func: Callable
     ) -> SchedulerInitResult:
         """Launch schedulers as Ray actors."""
         if server_args.dp_size > 1:
