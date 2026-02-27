@@ -47,6 +47,5 @@ It learns from [Copybara](https://github.com/google/copybara), a tool used at Go
                 default=ServerArgs.private_flag,
             )
     ```
-- Similarly, you can inherit `Engine` and override its class attributes. You can override `server_args_class` to use your own ServerArgs,
+- Similarly, you can inherit `Engine` and override its fields. You can override `server_args_class` to use your own ServerArgs,
   override `init_tokenizer_manager_func` to use your own TokenizerManager, override `run_scheduler_process_func` to use your own scheduler.
-  You can also override the `_launch_scheduler_processes` classmethod for a completely different scheduling backend (see `RayEngine` for an example).
