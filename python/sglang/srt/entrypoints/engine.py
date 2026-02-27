@@ -531,28 +531,8 @@ class Engine(EngineBase):
                         + ((pp_rank % pp_size_per_node) * tp_size_per_node)
                         + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
                     )
-                    attn_dp_size = (
-                        server_args.dp_size if server_args.enable_dp_attention else 1
-                    )
-
-                    # Parallelism hierarchy (outermost to innermost):
-                    # - Attention: Global(TP) -> DP -> ATTN_CP -> ATTN_TP (innermost)
-                    # - MoE: Global(TP) -> MOE_DP -> EP -> MOE_TP (innermost)
-                    attn_tp_size = (
-                        server_args.tp_size // attn_dp_size // server_args.attn_cp_size
-                    )
-                    attn_cp_rank = (tp_rank // attn_tp_size) % server_args.attn_cp_size
-                    moe_dp_rank = tp_rank // (
-                        server_args.tp_size // server_args.moe_dp_size
-                    )
-                    moe_ep_rank = (
-                        tp_rank
-                        % (server_args.tp_size // server_args.moe_dp_size)
-                        // (
-                            server_args.tp_size
-                            // server_args.moe_dp_size
-                            // server_args.ep_size
-                        )
+                    attn_cp_rank, moe_dp_rank, moe_ep_rank = (
+                        _compute_parallelism_ranks(server_args, tp_rank)
                     )
 
                     with maybe_reindex_device_id(gpu_id) as gpu_id:
@@ -1207,6 +1187,26 @@ def _calculate_rank_ranges(
     )
 
     return pp_rank_range, tp_rank_range, pp_size_per_node, tp_size_per_node
+
+
+def _compute_parallelism_ranks(
+    server_args: ServerArgs, tp_rank: int
+) -> Tuple[int, int, int]:
+    """Compute attention-CP, MoE-DP, and MoE-EP ranks for a TP rank."""
+    attn_dp_size = server_args.dp_size if server_args.enable_dp_attention else 1
+
+    # Parallelism hierarchy (outermost to innermost):
+    # - Attention: Global(TP) -> DP -> ATTN_CP -> ATTN_TP (innermost)
+    # - MoE: Global(TP) -> MOE_DP -> EP -> MOE_TP (innermost)
+    attn_tp_size = server_args.tp_size // attn_dp_size // server_args.attn_cp_size
+    attn_cp_rank = (tp_rank // attn_tp_size) % server_args.attn_cp_size
+    moe_dp_rank = tp_rank // (server_args.tp_size // server_args.moe_dp_size)
+    moe_ep_rank = (
+        tp_rank
+        % (server_args.tp_size // server_args.moe_dp_size)
+        // (server_args.tp_size // server_args.moe_dp_size // server_args.ep_size)
+    )
+    return attn_cp_rank, moe_dp_rank, moe_ep_rank
 
 
 def _launch_subprocesses(

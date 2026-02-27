@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Callable
 
@@ -25,6 +26,7 @@ from sglang.srt.entrypoints.engine import (
     Engine,
     SchedulerInitResult,
     _calculate_rank_ranges,
+    _compute_parallelism_ranks,
 )
 from sglang.srt.ray.scheduler_actor import SchedulerActor
 from sglang.srt.server_args import ZMQ_TCP_PORT_DELTA, PortArgs, ServerArgs
@@ -103,24 +105,8 @@ class RayEngine(Engine):
                         tp_rank % tp_per_node
                     )
 
-                    attn_dp_size = (
-                        server_args.dp_size if server_args.enable_dp_attention else 1
-                    )
-                    attn_tp_size = (
-                        server_args.tp_size // attn_dp_size // server_args.attn_cp_size
-                    )
-                    attn_cp_rank = (tp_rank // attn_tp_size) % server_args.attn_cp_size
-                    moe_dp_rank = tp_rank // (
-                        server_args.tp_size // server_args.moe_dp_size
-                    )
-                    moe_ep_rank = (
-                        tp_rank
-                        % (server_args.tp_size // server_args.moe_dp_size)
-                        // (
-                            server_args.tp_size
-                            // server_args.moe_dp_size
-                            // server_args.ep_size
-                        )
+                    attn_cp_rank, moe_dp_rank, moe_ep_rank = (
+                        _compute_parallelism_ranks(server_args, tp_rank)
                     )
 
                     actor = SchedulerActor.options(
@@ -169,3 +155,21 @@ class RayEngine(Engine):
             scheduler_infos=scheduler_infos,
             wait_for_completion=wait_for_completion,
         )
+
+
+def _launch_subprocesses(
+    server_args: ServerArgs,
+) -> tuple:
+    """Launch subprocesses using RayEngine (Ray actor scheduler backend)."""
+    from sglang.srt.entrypoints.engine import (
+        init_tokenizer_manager,
+        run_detokenizer_process,
+        run_scheduler_process,
+    )
+
+    return RayEngine._launch_workers(
+        server_args=server_args,
+        init_tokenizer_manager_func=init_tokenizer_manager,
+        run_scheduler_process_func=run_scheduler_process,
+        run_detokenizer_process_func=run_detokenizer_process,
+    )

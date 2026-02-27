@@ -18,23 +18,6 @@ from typing import Callable, Optional
 from sglang.srt.server_args import ServerArgs
 
 
-def _launch_ray_subprocesses(server_args: ServerArgs):
-    """Launch subprocesses using RayEngine (Ray actor scheduler backend)."""
-    from sglang.srt.entrypoints.engine import (
-        init_tokenizer_manager,
-        run_detokenizer_process,
-        run_scheduler_process,
-    )
-    from sglang.srt.ray.engine import RayEngine
-
-    return RayEngine._launch_workers(
-        server_args=server_args,
-        init_tokenizer_manager_func=init_tokenizer_manager,
-        run_scheduler_process_func=run_scheduler_process,
-        run_detokenizer_process_func=run_detokenizer_process,
-    )
-
-
 def launch_server(
     server_args: ServerArgs,
     execute_warmup_func: Optional[Callable] = None,
@@ -48,6 +31,7 @@ def launch_server(
         _execute_server_warmup,
         _setup_and_run_http_server,
     )
+    from sglang.srt.ray.engine import _launch_subprocesses
 
     if execute_warmup_func is None:
         execute_warmup_func = _execute_server_warmup
@@ -57,7 +41,7 @@ def launch_server(
         template_manager,
         port_args,
         scheduler_result,
-    ) = _launch_ray_subprocesses(server_args)
+    ) = _launch_subprocesses(server_args)
 
     _setup_and_run_http_server(
         server_args,
