@@ -105,8 +105,8 @@ class RayEngine(Engine):
                         tp_rank % tp_per_node
                     )
 
-                    attn_cp_rank, moe_dp_rank, moe_ep_rank = (
-                        _compute_parallelism_ranks(server_args, tp_rank)
+                    attn_cp_rank, moe_dp_rank, moe_ep_rank = _compute_parallelism_ranks(
+                        server_args, tp_rank
                     )
 
                     actor = SchedulerActor.options(

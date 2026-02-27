@@ -531,8 +531,8 @@ class Engine(EngineBase):
                         + ((pp_rank % pp_size_per_node) * tp_size_per_node)
                         + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
                     )
-                    attn_cp_rank, moe_dp_rank, moe_ep_rank = (
-                        _compute_parallelism_ranks(server_args, tp_rank)
+                    attn_cp_rank, moe_dp_rank, moe_ep_rank = _compute_parallelism_ranks(
+                        server_args, tp_rank
                     )
 
                     with maybe_reindex_device_id(gpu_id) as gpu_id:
