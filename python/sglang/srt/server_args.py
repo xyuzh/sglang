@@ -3578,8 +3578,7 @@ class ServerArgs:
         parser.add_argument(
             "--use-ray",
             action="store_true",
-            help="Use Ray actors for scheduler process management instead of multiprocessing. "
-            "Enables declarative GPU allocation and multi-node placement.",
+            help="Use Ray actors for scheduler process management.",
         )
         parser.add_argument(
             "--custom-sigquit-handler",
