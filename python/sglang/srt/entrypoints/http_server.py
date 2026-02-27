@@ -1961,10 +1961,7 @@ def _setup_and_run_http_server(
     execute_warmup_func: Callable = _execute_server_warmup,
     launch_callback: Optional[Callable[[], None]] = None,
 ):
-    """Set global state, configure middleware, and run uvicorn.
-
-    Shared by mp launch_server() and ray/http_server.launch_server().
-    """
+    """Set global state, configure middleware, and run uvicorn."""
     remote_instance_transfer_engine_info = (
         parse_remote_instance_transfer_engine_info_from_scheduler_infos(scheduler_infos)
     )
