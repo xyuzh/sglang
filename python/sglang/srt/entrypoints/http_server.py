@@ -1961,11 +1961,12 @@ def _setup_and_run_http_server(
     execute_warmup_func: Callable = _execute_server_warmup,
     launch_callback: Optional[Callable[[], None]] = None,
 ):
-    """Set global state, configure middleware, and run uvicorn."""
+    # Parse info got from the schedulers
     remote_instance_transfer_engine_info = (
         parse_remote_instance_transfer_engine_info_from_scheduler_infos(scheduler_infos)
     )
 
+    # Set global states
     set_global_state(
         _GlobalState(
             tokenizer_manager=tokenizer_manager,
@@ -1978,7 +1979,10 @@ def _setup_and_run_http_server(
     if server_args.enable_metrics:
         add_prometheus_track_response_middleware(app)
 
+    # Pass additional arguments to the lifespan function.
+    # They will be used for additional initialization setups.
     if server_args.tokenizer_worker_num == 1:
+        # If it is single tokenizer mode, we can pass the arguments by attributes of the app object.
         app.is_single_tokenizer_mode = True
         app.server_args = server_args
         app.warmup_thread_kwargs = dict(
@@ -1987,6 +1991,13 @@ def _setup_and_run_http_server(
             execute_warmup_func=execute_warmup_func,
         )
 
+        # Add api key authorization
+        # This is only supported in single tokenizer mode.
+        #
+        # Backward compatibility:
+        # - api_key only: behavior matches legacy (all endpoints require api_key)
+        # - no keys: legacy had no restriction; ADMIN_FORCE endpoints must still be rejected when
+        #   admin_api_key is not configured.
         if (
             server_args.api_key
             or server_args.admin_api_key
@@ -2000,15 +2011,20 @@ def _setup_and_run_http_server(
                 admin_api_key=server_args.admin_api_key,
             )
     else:
+        # If it is multi-tokenizer mode, we need to write the arguments to shared memory
+        # for other worker processes to read.
         app.is_single_tokenizer_mode = False
         multi_tokenizer_args_shm = write_data_for_multi_tokenizer(
             port_args, server_args, scheduler_infos[0]
         )
 
     try:
+        # Update logging configs
         set_uvicorn_logging_configs(server_args)
 
+        # Listen for HTTP requests
         if server_args.tokenizer_worker_num == 1:
+            # Default case, one tokenizer process
             uvicorn.run(
                 app,
                 host=server_args.host,
@@ -2019,6 +2035,7 @@ def _setup_and_run_http_server(
                 loop="uvloop",
             )
         else:
+            # Multiple tokenizer and http processes
             from uvicorn.config import LOGGING_CONFIG
 
             LOGGING_CONFIG["loggers"]["sglang.srt.entrypoints.http_server"] = {
