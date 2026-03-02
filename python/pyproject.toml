@@ -150,7 +150,6 @@ dev = ["sglang[test]"]
 all = [
   "sglang[diffusion]",
   "sglang[tracing]",
-  "sglang[ray]",
 ]
 
 [tool.uv.extra-build-dependencies]

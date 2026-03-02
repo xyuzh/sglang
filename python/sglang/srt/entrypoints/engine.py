@@ -607,14 +607,17 @@ class Engine(EngineBase):
         Returns:
             Tuple of (tokenizer_manager, template_manager, port_args, scheduler_result).
         """
+        # Configure global environment
         configure_logger(server_args)
         _set_envs_and_config(server_args)
         server_args.check_server_args()
 
+        # Allocate ports for inter-process communications
         if port_args is None:
             port_args = PortArgs.init_new(server_args)
         logger.info(f"{server_args=}")
 
+        # Launch scheduler processes
         scheduler_result = cls._launch_scheduler_processes(
             server_args, port_args, run_scheduler_process_func
         )
