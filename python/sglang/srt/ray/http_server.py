@@ -15,12 +15,12 @@
 
 from typing import Callable, Optional
 
-from sglang.srt.server_args import ServerArgs
 from sglang.srt.entrypoints.engine import (
     init_tokenizer_manager,
     run_detokenizer_process,
     run_scheduler_process,
 )
+from sglang.srt.server_args import ServerArgs
 
 
 def launch_server(

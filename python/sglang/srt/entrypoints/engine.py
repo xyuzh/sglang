@@ -560,6 +560,7 @@ class Engine(EngineBase):
                     scheduler_procs.append(proc)
                     scheduler_pipe_readers.append(reader)
         else:
+            # Launch the data parallel controller
             reader, writer = mp.Pipe(duplex=False)
             scheduler_pipe_readers = [reader]
             proc = mp.Process(
