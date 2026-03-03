@@ -16,10 +16,18 @@
 from typing import Callable, Optional
 
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.entrypoints.engine import (
+    init_tokenizer_manager,
+    run_detokenizer_process,
+    run_scheduler_process,
+)
 
 
 def launch_server(
     server_args: ServerArgs,
+    init_tokenizer_manager_func: Callable = init_tokenizer_manager,
+    run_scheduler_process_func: Callable = run_scheduler_process,
+    run_detokenizer_process_func: Callable = run_detokenizer_process,
     execute_warmup_func: Optional[Callable] = None,
     launch_callback: Optional[Callable[[], None]] = None,
 ):
@@ -36,19 +44,21 @@ def launch_server(
     if execute_warmup_func is None:
         execute_warmup_func = _execute_server_warmup
 
-    (
-        tokenizer_manager,
-        template_manager,
-        port_args,
-        scheduler_result,
-    ) = _launch_subprocesses(server_args)
+    tokenizer_manager, template_manager, port_args, scheduler_init_result = (
+        _launch_subprocesses(
+            server_args,
+            init_tokenizer_manager_func=init_tokenizer_manager_func,
+            run_scheduler_process_func=run_scheduler_process_func,
+            run_detokenizer_process_func=run_detokenizer_process_func,
+        )
+    )
 
     _setup_and_run_http_server(
         server_args,
         tokenizer_manager,
         template_manager,
         port_args,
-        scheduler_result.scheduler_infos,
+        scheduler_init_result.scheduler_infos,
         execute_warmup_func=execute_warmup_func,
         launch_callback=launch_callback,
     )

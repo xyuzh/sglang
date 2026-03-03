@@ -2084,16 +2084,15 @@ def launch_server(
     1. The HTTP server, Engine, and TokenizerManager all run in the main process.
     2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
     """
-    (
-        tokenizer_manager,
-        template_manager,
-        port_args,
-        scheduler_result,
-    ) = _launch_subprocesses(
-        server_args=server_args,
-        init_tokenizer_manager_func=init_tokenizer_manager_func,
-        run_scheduler_process_func=run_scheduler_process_func,
-        run_detokenizer_process_func=run_detokenizer_process_func,
+    # Launch subprocesses
+
+    tokenizer_manager, template_manager, port_args, scheduler_init_result = (
+        _launch_subprocesses(
+            server_args=server_args,
+            init_tokenizer_manager_func=init_tokenizer_manager_func,
+            run_scheduler_process_func=run_scheduler_process_func,
+            run_detokenizer_process_func=run_detokenizer_process_func,
+        )
     )
 
     _setup_and_run_http_server(
@@ -2101,7 +2100,7 @@ def launch_server(
         tokenizer_manager,
         template_manager,
         port_args,
-        scheduler_result.scheduler_infos,
+        scheduler_init_result.scheduler_infos,
         execute_warmup_func=execute_warmup_func,
         launch_callback=launch_callback,
     )

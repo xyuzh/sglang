@@ -509,6 +509,7 @@ class Engine(EngineBase):
         scheduler_procs = []
 
         if server_args.dp_size == 1:
+            # Launch tensor parallel scheduler processes
             memory_saver_adapter = TorchMemorySaverAdapter.create(
                 enable=server_args.enable_memory_saver
             )
@@ -602,7 +603,7 @@ class Engine(EngineBase):
         run_detokenizer_process_func: Callable,
         port_args: Optional[PortArgs] = None,
     ) -> Tuple[TokenizerManager, TemplateManager, PortArgs, SchedulerInitResult]:
-        """Launch the TokenizerManager, Scheduler workers, and DetokenizerManager.
+        """Launch the TokenizerManager in the main process, the Scheduler in a subprocess, and the DetokenizerManager in another subprocess.
 
         Returns:
             Tuple of (tokenizer_manager, template_manager, port_args, scheduler_init_result).
@@ -629,9 +630,12 @@ class Engine(EngineBase):
             run_expert_backup_manager(server_args, port_args)
 
         if server_args.node_rank >= 1:
+            # In multi-node cases, non-zero rank nodes do not need to run tokenizer or detokenizer,
+            # so they can just wait here.
             scheduler_init_result.wait_for_ready()
 
             if os.getenv("SGLANG_BLOCK_NONZERO_RANK_CHILDREN") == "0":
+                # When using `Engine` as a Python API, we don't want to block here.
                 return (
                     None,
                     None,
@@ -651,6 +655,7 @@ class Engine(EngineBase):
                 scheduler_init_result,
             )
 
+        # Launch detokenizer process
         detoken_proc = mp.Process(
             target=run_detokenizer_process_func,
             args=(
@@ -660,16 +665,20 @@ class Engine(EngineBase):
         )
         detoken_proc.start()
 
+        # Init tokenizer manager first, as the bootstrap server is initialized here
         if server_args.tokenizer_worker_num == 1:
             tokenizer_manager, template_manager = init_tokenizer_manager_func(
                 server_args, port_args
             )
         else:
+            # Launch multi-tokenizer router
             tokenizer_manager = MultiTokenizerRouter(server_args, port_args)
             template_manager = None
 
+        # Wait for the model to finish loading
         scheduler_init_result.wait_for_ready()
 
+        # Get back some info from scheduler to tokenizer_manager
         tokenizer_manager.max_req_input_len = scheduler_init_result.scheduler_infos[0][
             "max_req_input_len"
         ]
