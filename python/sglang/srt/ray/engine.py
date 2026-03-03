@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Callable
 
@@ -31,6 +32,13 @@ from sglang.srt.ray.scheduler_actor import SchedulerActor
 from sglang.srt.server_args import ZMQ_TCP_PORT_DELTA, PortArgs, ServerArgs
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass
+class RaySchedulerInitResult(SchedulerInitResult):
+    """SchedulerInitResult that also holds Ray actor handles for cleanup."""
+
+    scheduler_actors: list = dataclasses.field(default_factory=list)
 
 
 def _get_rank0_node_ip(placement_group) -> str:
@@ -57,6 +65,15 @@ def _get_rank0_node_ip(placement_group) -> str:
 
 class RayEngine(Engine):
     """Engine using Ray actors for scheduler processes."""
+
+    def shutdown(self):
+        """Shutdown the engine — kill Ray scheduler actors then local processes."""
+        for actor in self._scheduler_init_result.scheduler_actors:
+            try:
+                ray.kill(actor)
+            except Exception:
+                pass
+        super().shutdown()
 
     @classmethod
     def _launch_scheduler_processes(
@@ -150,9 +167,10 @@ class RayEngine(Engine):
             except Exception as e:
                 logger.error(f"Ray scheduler actor terminated with error: {e}")
 
-        return SchedulerInitResult(
+        return RaySchedulerInitResult(
             scheduler_infos=scheduler_infos,
             wait_for_completion=wait_for_completion,
+            scheduler_actors=scheduler_actors,
         )
 
 

@@ -192,7 +192,7 @@ class Engine(EngineBase):
         )
         self.tokenizer_manager = tokenizer_manager
         self.template_manager = template_manager
-        self.scheduler_info = scheduler_init_result.scheduler_infos[0]
+        self._scheduler_init_result = scheduler_init_result
         self.port_args = port_args
         self.remote_instance_transfer_engine_info = (
             parse_remote_instance_transfer_engine_info_from_scheduler_infos(
@@ -605,7 +605,7 @@ class Engine(EngineBase):
         """Launch the TokenizerManager, Scheduler workers, and DetokenizerManager.
 
         Returns:
-            Tuple of (tokenizer_manager, template_manager, port_args, scheduler_result).
+            Tuple of (tokenizer_manager, template_manager, port_args, scheduler_init_result).
         """
         # Configure global environment
         configure_logger(server_args)
@@ -618,7 +618,7 @@ class Engine(EngineBase):
         logger.info(f"{server_args=}")
 
         # Launch scheduler processes
-        scheduler_result = cls._launch_scheduler_processes(
+        scheduler_init_result = cls._launch_scheduler_processes(
             server_args, port_args, run_scheduler_process_func
         )
 
@@ -629,26 +629,26 @@ class Engine(EngineBase):
             run_expert_backup_manager(server_args, port_args)
 
         if server_args.node_rank >= 1:
-            scheduler_result.wait_for_ready()
+            scheduler_init_result.wait_for_ready()
 
             if os.getenv("SGLANG_BLOCK_NONZERO_RANK_CHILDREN") == "0":
                 return (
                     None,
                     None,
                     port_args,
-                    scheduler_result,
+                    scheduler_init_result,
                 )
 
             launch_dummy_health_check_server(
                 server_args.host, server_args.port, server_args.enable_metrics
             )
 
-            scheduler_result.wait_for_completion()
+            scheduler_init_result.wait_for_completion()
             return (
                 None,
                 None,
                 port_args,
-                scheduler_result,
+                scheduler_init_result,
             )
 
         detoken_proc = mp.Process(
@@ -668,9 +668,9 @@ class Engine(EngineBase):
             tokenizer_manager = MultiTokenizerRouter(server_args, port_args)
             template_manager = None
 
-        scheduler_result.wait_for_ready()
+        scheduler_init_result.wait_for_ready()
 
-        tokenizer_manager.max_req_input_len = scheduler_result.scheduler_infos[0][
+        tokenizer_manager.max_req_input_len = scheduler_init_result.scheduler_infos[0][
             "max_req_input_len"
         ]
 
@@ -678,7 +678,7 @@ class Engine(EngineBase):
             tokenizer_manager,
             template_manager,
             port_args,
-            scheduler_result,
+            scheduler_init_result,
         )
 
     def shutdown(self):
@@ -761,7 +761,7 @@ class Engine(EngineBase):
         )
         return {
             **dataclasses.asdict(self.tokenizer_manager.server_args),
-            **self.scheduler_info,
+            **self._scheduler_init_result.scheduler_infos[0],
             "internal_states": internal_states,
             "version": __version__,
         }
