@@ -1136,43 +1136,14 @@ class Scheduler(
     def run_event_loop(self) -> None:
         """Run the scheduler's event loop.
 
-        This method dispatches to the appropriate event loop variant based on
-        the server configuration (disaggregation mode, pp_size, overlap, etc.).
+        Sets up the schedule stream and dispatches to the appropriate event loop.
         The event loop blocks until shutdown.
         """
         self.schedule_stream = self.device_module.Stream(priority=0)
         if self.device == "cpu":
             self.schedule_stream.synchronize = lambda: None  # No-op for CPU
         with CudaStreamContext(self.schedule_stream):
-            self._dispatch_event_loop()
-
-    def _dispatch_event_loop(self) -> None:
-        """Dispatch to the appropriate event loop variant."""
-        if self.disaggregation_mode == DisaggregationMode.NULL:
-            if self.enable_pdmux:
-                self.event_loop_pdmux()
-            elif self.server_args.pp_size > 1:
-                self.event_loop_pp()
-            elif self.enable_overlap:
-                self.event_loop_overlap()
-            else:
-                self.event_loop_normal()
-        elif self.disaggregation_mode == DisaggregationMode.PREFILL:
-            if self.server_args.pp_size > 1:
-                self.event_loop_pp_disagg_prefill()
-            elif self.enable_overlap:
-                self.event_loop_overlap_disagg_prefill()
-            else:
-                self.event_loop_normal_disagg_prefill()
-        elif self.disaggregation_mode == DisaggregationMode.DECODE:
-            if self.server_args.pp_size > 1:
-                self.event_loop_pp_disagg_decode()
-            elif self.enable_overlap:
-                self.event_loop_overlap_disagg_decode()
-            else:
-                self.event_loop_normal_disagg_decode()
-        else:
-            raise ValueError(f"Unknown disaggregation mode: {self.disaggregation_mode}")
+            dispatch_event_loop(self)
 
     @DynamicGradMode()
     def event_loop_normal(self):
@@ -3144,6 +3115,35 @@ class SenderWrapper:
             output.http_worker_ipc = recv_obj.http_worker_ipc
 
         self.socket.send_pyobj(output)
+
+
+def dispatch_event_loop(scheduler: Scheduler):
+    # Dispatch to the appropriate event loop based on the disaggregation mode
+    server_args = scheduler.server_args
+    disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
+    if disaggregation_mode == DisaggregationMode.NULL:
+        if scheduler.enable_pdmux:
+            scheduler.event_loop_pdmux()
+        elif server_args.pp_size > 1:
+            scheduler.event_loop_pp()
+        elif scheduler.enable_overlap:
+            scheduler.event_loop_overlap()
+        else:
+            scheduler.event_loop_normal()
+    elif disaggregation_mode == DisaggregationMode.PREFILL:
+        if server_args.pp_size > 1:
+            scheduler.event_loop_pp_disagg_prefill()
+        elif scheduler.enable_overlap:
+            scheduler.event_loop_overlap_disagg_prefill()
+        else:
+            scheduler.event_loop_normal_disagg_prefill()
+    elif disaggregation_mode == DisaggregationMode.DECODE:
+        if server_args.pp_size > 1:
+            scheduler.event_loop_pp_disagg_decode()
+        elif scheduler.enable_overlap:
+            scheduler.event_loop_overlap_disagg_decode()
+        else:
+            scheduler.event_loop_normal_disagg_decode()
 
 
 def configure_scheduler(
