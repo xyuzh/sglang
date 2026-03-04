@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import Callable
+from typing import Callable, Tuple
 
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -30,6 +30,8 @@ from sglang.srt.entrypoints.engine import (
 )
 from sglang.srt.ray.scheduler_actor import SchedulerActor
 from sglang.srt.server_args import ZMQ_TCP_PORT_DELTA, PortArgs, ServerArgs
+from sglang.srt.managers.template_manager import TemplateManager
+from sglang.srt.managers.tokenizer_manager import TokenizerManager
 
 logger = logging.getLogger(__name__)
 
@@ -176,17 +178,19 @@ class RayEngine(Engine):
 
 def _launch_subprocesses(
     server_args: ServerArgs,
-) -> tuple:
-    """Launch subprocesses using RayEngine (Ray actor scheduler backend)."""
-    from sglang.srt.entrypoints.engine import (
-        init_tokenizer_manager,
-        run_detokenizer_process,
-        run_scheduler_process,
-    )
-
+    init_tokenizer_manager_func: Callable,
+    run_scheduler_process_func: Callable,
+    run_detokenizer_process_func: Callable,
+) -> Tuple[
+    TokenizerManager,
+    TemplateManager,
+    PortArgs,
+    SchedulerInitResult,
+]:
+    """Module-level launcher used by http_server.py (Ray actor scheduler backend)."""
     return RayEngine._launch_workers(
         server_args=server_args,
-        init_tokenizer_manager_func=init_tokenizer_manager,
-        run_scheduler_process_func=run_scheduler_process,
-        run_detokenizer_process_func=run_detokenizer_process,
+        init_tokenizer_manager_func=init_tokenizer_manager_func,
+        run_scheduler_process_func=run_scheduler_process_func,
+        run_detokenizer_process_func=run_detokenizer_process_func,
     )
