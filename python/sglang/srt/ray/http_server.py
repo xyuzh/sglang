@@ -39,13 +39,13 @@ def launch_server(
         _execute_server_warmup,
         _setup_and_run_http_server,
     )
-    from sglang.srt.ray.engine import _launch_subprocesses
+    from sglang.srt.ray.engine import RayEngine
 
     if execute_warmup_func is None:
         execute_warmup_func = _execute_server_warmup
 
     tokenizer_manager, template_manager, port_args, scheduler_init_result = (
-        _launch_subprocesses(
+        RayEngine._launch_subprocesses(
             server_args,
             init_tokenizer_manager_func=init_tokenizer_manager_func,
             run_scheduler_process_func=run_scheduler_process_func,

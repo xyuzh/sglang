@@ -185,7 +185,7 @@ class Engine(EngineBase):
             template_manager,
             port_args,
             scheduler_init_result,
-        ) = self._launch_workers(
+        ) = self._launch_subprocesses(
             server_args=server_args,
             init_tokenizer_manager_func=self.init_tokenizer_manager_func,
             run_scheduler_process_func=self.run_scheduler_process_func,
@@ -599,7 +599,7 @@ class Engine(EngineBase):
         )
 
     @classmethod
-    def _launch_workers(
+    def _launch_subprocesses(
         cls,
         server_args: ServerArgs,
         init_tokenizer_manager_func: Callable,
@@ -1224,23 +1224,3 @@ def _compute_parallelism_ranks(
     return attn_cp_rank, moe_dp_rank, moe_ep_rank
 
 
-def _launch_subprocesses(
-    server_args: ServerArgs,
-    init_tokenizer_manager_func: Callable,
-    run_scheduler_process_func: Callable,
-    run_detokenizer_process_func: Callable,
-    port_args: Optional[PortArgs] = None,
-) -> Tuple[
-    TokenizerManager,
-    TemplateManager,
-    PortArgs,
-    SchedulerInitResult,
-]:
-    """Module-level launcher used by http_server.py."""
-    return Engine._launch_workers(
-        server_args=server_args,
-        init_tokenizer_manager_func=init_tokenizer_manager_func,
-        run_scheduler_process_func=run_scheduler_process_func,
-        run_detokenizer_process_func=run_detokenizer_process_func,
-        port_args=port_args,
-    )

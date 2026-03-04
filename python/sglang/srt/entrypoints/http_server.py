@@ -67,7 +67,7 @@ from sglang.srt.entrypoints.anthropic.protocol import (
 )
 from sglang.srt.entrypoints.anthropic.serving import AnthropicServing
 from sglang.srt.entrypoints.engine import (
-    _launch_subprocesses,
+    Engine,
     init_tokenizer_manager,
     run_detokenizer_process,
     run_scheduler_process,
@@ -2098,7 +2098,7 @@ def launch_server(
     """
     # Launch subprocesses
     tokenizer_manager, template_manager, port_args, scheduler_init_result = (
-        _launch_subprocesses(
+        Engine._launch_subprocesses(
             server_args=server_args,
             init_tokenizer_manager_func=init_tokenizer_manager_func,
             run_scheduler_process_func=run_scheduler_process_func,

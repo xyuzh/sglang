@@ -176,21 +176,3 @@ class RayEngine(Engine):
         )
 
 
-def _launch_subprocesses(
-    server_args: ServerArgs,
-    init_tokenizer_manager_func: Callable,
-    run_scheduler_process_func: Callable,
-    run_detokenizer_process_func: Callable,
-) -> Tuple[
-    TokenizerManager,
-    TemplateManager,
-    PortArgs,
-    SchedulerInitResult,
-]:
-    """Module-level launcher used by http_server.py (Ray actor scheduler backend)."""
-    return RayEngine._launch_workers(
-        server_args=server_args,
-        init_tokenizer_manager_func=init_tokenizer_manager_func,
-        run_scheduler_process_func=run_scheduler_process_func,
-        run_detokenizer_process_func=run_detokenizer_process_func,
-    )
