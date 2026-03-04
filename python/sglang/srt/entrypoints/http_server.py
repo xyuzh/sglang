@@ -1968,6 +1968,7 @@ def _setup_and_run_http_server(
     # Reserve the HTTP port before launching subprocesses to fail fast if port is unavailable.
     # This prevents wasting time loading models only to discover port conflicts later.
     reserved_socket = _prebind_listening_socket(server_args.host, server_args.port)
+    multi_tokenizer_args_shm = None
 
     try:
         # Parse info got from the schedulers
@@ -2032,6 +2033,10 @@ def _setup_and_run_http_server(
         # Update logging configs
         set_uvicorn_logging_configs(server_args)
 
+        # Delay listen() until uvicorn startup to avoid accepting probe traffic
+        # while model/subprocess initialization is still in progress.
+        reserved_socket.listen(128)
+
         # Listen for HTTP requests
         if server_args.tokenizer_worker_num == 1:
             # Default case, one tokenizer process
@@ -2069,8 +2074,10 @@ def _setup_and_run_http_server(
         reserved_socket.close()
 
         if server_args.tokenizer_worker_num > 1:
-            multi_tokenizer_args_shm.unlink()
-            _global_state.tokenizer_manager.socket_mapping.clear_all_sockets()
+            if multi_tokenizer_args_shm is not None:
+                multi_tokenizer_args_shm.unlink()
+            if _global_state is not None:
+                _global_state.tokenizer_manager.socket_mapping.clear_all_sockets()
 
 
 def launch_server(

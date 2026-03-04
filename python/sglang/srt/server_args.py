@@ -198,6 +198,7 @@ FP8_GEMM_RUNNER_BACKEND_CHOICES = [
     "auto",
     "deep_gemm",
     "flashinfer_trtllm",
+    "flashinfer_cutlass",
     "flashinfer_deepgemm",
     "cutlass",
     "triton",
@@ -646,6 +647,7 @@ class ServerArgs:
     nsa_prefill_cp_mode: str = "round-robin-split"
     enable_fused_qk_norm_rope: bool = False
     enable_precise_embedding_interpolation: bool = False
+    enable_fused_moe_sum_all_reduce: bool = False
 
     # Dynamic batch tokenizer
     enable_dynamic_batch_tokenizer: bool = False
@@ -1301,9 +1303,8 @@ class ServerArgs:
                             self.moe_dense_tp_size = 1
                             self.moe_a2a_backend = "deepep"
                             self.ep_size = self.tp_size
-                            self.kv_cache_dtype = "bf16"
                             logger.warning(
-                                "For in-seq split mode, we have the following restrictions: moe_dense_tp_size == 1, moe_a2a_backend == deepep, ep_size == tp_size, kv_cache_dtype == bf16, batch_size == 1"
+                                "For in-seq split mode, we have the following restrictions: moe_dense_tp_size == 1, moe_a2a_backend == deepep, ep_size == tp_size, batch_size == 1"
                             )
                         else:
                             self.enable_dp_attention = True
@@ -4091,6 +4092,7 @@ class ServerArgs:
             "Options: 'auto' (default, auto-selects based on hardware), "
             "'deep_gemm' (JIT-compiled; enabled by default on NVIDIA Hopper (SM90) and Blackwell (SM100) when DeepGEMM is installed), "
             "'flashinfer_trtllm' (optimal for Blackwell and low-latency), "
+            "'flashinfer_cutlass' (FlashInfer CUTLASS groupwise FP8 GEMM), "
             "'flashinfer_deepgemm' (Hopper SM90 only; uses swapAB optimization for small M dimensions in decoding), "
             "'cutlass' (optimal for Hopper/Blackwell GPUs and high-throughput), "
             "'triton' (fallback, widely compatible), "
@@ -5035,6 +5037,11 @@ class ServerArgs:
             "--enable-precise-embedding-interpolation",
             action="store_true",
             help="Enable corner alignment for resize of embeddings grid to ensure more accurate(but slower) evaluation of interpolated embedding values.",
+        )
+        parser.add_argument(
+            "--enable-fused-moe-sum-all-reduce",
+            action="store_true",
+            help="Enable fused moe triton and sum all reduce.",
         )
 
         # Dynamic batch tokenizer
