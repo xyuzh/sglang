@@ -1965,7 +1965,8 @@ def _setup_and_run_http_server(
 
     Called by launch_server after subprocesses have been launched.
     """
-    # Reserve the HTTP port before starting to fail fast if port is unavailable.
+    # Reserve the HTTP port before launching subprocesses to fail fast if port is unavailable.
+    # This prevents wasting time loading models only to discover port conflicts later.
     reserved_socket = _prebind_listening_socket(server_args.host, server_args.port)
 
     try:
@@ -2096,7 +2097,6 @@ def launch_server(
     2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
     """
     # Launch subprocesses
-
     tokenizer_manager, template_manager, port_args, scheduler_init_result = (
         _launch_subprocesses(
             server_args=server_args,
