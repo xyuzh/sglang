@@ -364,8 +364,7 @@ def _create_ray_engine_backend(server_args: ServerArgs):
     ).remote(**dataclasses.asdict(server_args))
 
     class _Proxy:
-        """Forwards method calls to the remote RayEngine actor.
-        """
+        """Forwards method calls to the remote RayEngine actor."""
 
         def generate(self, **kwargs):
             return ray.get(actor.call.remote("generate", **kwargs))

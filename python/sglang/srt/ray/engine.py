@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import Callable, Tuple
+from typing import Callable
 
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -30,8 +30,6 @@ from sglang.srt.entrypoints.engine import (
 )
 from sglang.srt.ray.scheduler_actor import SchedulerActor
 from sglang.srt.server_args import ZMQ_TCP_PORT_DELTA, PortArgs, ServerArgs
-from sglang.srt.managers.template_manager import TemplateManager
-from sglang.srt.managers.tokenizer_manager import TokenizerManager
 
 logger = logging.getLogger(__name__)
 
@@ -174,5 +172,3 @@ class RayEngine(Engine):
             wait_for_completion=wait_for_completion,
             scheduler_actors=scheduler_actors,
         )
-
-
