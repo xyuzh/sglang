@@ -74,7 +74,7 @@ class RayEngine(Engine):
             try:
                 ray.kill(actor)
             except Exception:
-                pass
+                logger.error(f"Failed to kill Ray scheduler actor: {actor}")
         super().shutdown()
 
     @classmethod
@@ -158,7 +158,7 @@ class RayEngine(Engine):
                 try:
                     ray.kill(actor)
                 except Exception:
-                    pass
+                    logger.error(f"Failed to kill Ray scheduler actor: {actor}")
             raise RuntimeError(f"Scheduler actor failed to initialize: {e}")
 
         event_loop_refs = [actor.run_event_loop.remote() for actor in scheduler_actors]

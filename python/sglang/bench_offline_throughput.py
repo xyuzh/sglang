@@ -364,13 +364,20 @@ def _create_ray_engine_backend(server_args: ServerArgs):
     ).remote(**dataclasses.asdict(server_args))
 
     class _Proxy:
-        """Forwards method calls to the remote RayEngine actor."""
+        """Forwards method calls to the remote RayEngine actor.
+        """
 
-        def __getattr__(self, name):
-            def _forward(**kwargs):
-                return ray.get(actor.call.remote(name, **kwargs))
+        def generate(self, **kwargs):
+            return ray.get(actor.call.remote("generate", **kwargs))
 
-            return _forward
+        def get_server_info(self, **kwargs):
+            return ray.get(actor.call.remote("get_server_info", **kwargs))
+
+        def start_profile(self, **kwargs):
+            return ray.get(actor.call.remote("start_profile", **kwargs))
+
+        def stop_profile(self, **kwargs):
+            return ray.get(actor.call.remote("stop_profile", **kwargs))
 
         def shutdown(self):
             try:
