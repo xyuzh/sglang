@@ -1222,4 +1222,3 @@ def _compute_parallelism_ranks(
         // (server_args.tp_size // server_args.moe_dp_size // server_args.ep_size)
     )
     return attn_cp_rank, moe_dp_rank, moe_ep_rank
-
