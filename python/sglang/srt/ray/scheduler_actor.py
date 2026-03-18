@@ -16,15 +16,20 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import ray
+import torch
+import sys
 
 if TYPE_CHECKING:
     from sglang.srt.server_args import PortArgs, ServerArgs
 
 
-logger = logging.getLogger(__name__)
+logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
+logger = logging.getLogger("ray.serve")
 
 
 @ray.remote
@@ -33,6 +38,9 @@ class SchedulerActor:
 
     Each actor manages one GPU and runs the Scheduler + TpModelWorker stack.
     Ray is used for process lifecycle; ZMQ handles request/response communication.
+
+    max_concurrency=2 allows weight sync methods (pull_weights, etc.)
+    to run while run_event_loop() is active.
     """
 
     def __init__(
@@ -65,11 +73,9 @@ class SchedulerActor:
         if assigned_gpus:
             # Ray assigned specific GPU(s), use the first one
             actual_gpu_id = int(assigned_gpus[0])
-            logger.info(f"[TP{tp_rank}] Ray assigned GPU: {actual_gpu_id}")
         else:
             # Fallback to passed gpu_id
             actual_gpu_id = gpu_id
-            logger.info(f"[TP{tp_rank}] Using passed gpu_id: {gpu_id}")
 
         # Configure worker (logging, process title, etc.)
         dp_rank = configure_scheduler(
@@ -111,5 +117,65 @@ class SchedulerActor:
             torch.cuda.set_device(self.scheduler.gpu_id)
             self.scheduler.run_event_loop()
         except Exception as e:
-            logger.error(f"Scheduler PP{self._pp_rank} TP{self._tp_rank} crashed: {e}")
+            logger.error("Scheduler PP%s TP%s crashed: %s", self._pp_rank, self._tp_rank, e)
             raise
+
+    # ------------------------------------------------------------------
+    # Weight sync via RDT
+    # ------------------------------------------------------------------
+
+    def get_param_layout(self):
+        """Return shard config for this TP rank (fetched once at connect time)."""
+        from sglang.srt.ray.weight_sync import (
+            ParamInfo,
+            ParamLayout,
+            build_sharding_recipes,
+        )
+
+        model_runner = self.scheduler.tp_worker.model_runner
+        model = model_runner.model
+        tp_size = model_runner.tp_size
+
+        param_info = {
+            name: ParamInfo(shape=list(param.data.shape), dtype=param.data.dtype)
+            for name, param in model.named_parameters()
+        }
+        sharding_recipes = build_sharding_recipes(model, self._tp_rank, tp_size)
+
+        return ParamLayout(
+            tp_rank=self._tp_rank,
+            tp_size=tp_size,
+            param_info=param_info,
+            sharding_recipes=sharding_recipes,
+            stacked_params_mapping=getattr(model, "stacked_params_mapping", []),
+            num_attention_heads=getattr(model.config, "num_attention_heads", None),
+            num_key_value_heads=getattr(model.config, "num_key_value_heads", None),
+            hidden_size=getattr(model.config, "hidden_size", None),
+        )
+
+
+    def pull_weights(self, trainer_handle, param_names: list, tp_rank: int) -> bool:
+        """Pull pre-sharded weight bucket from trainer via RDT zero-copy.
+
+        Uses set_target_for_ref to RDMA directly into param.data buffers,
+        eliminating intermediate receive buffers and copy operations.
+        """
+        torch.cuda.set_device(self.scheduler.gpu_id)  # Guard for max_concurrency=2
+        ref = trainer_handle.export_weights_rdt.remote(tp_rank)
+        model = self.scheduler.tp_worker.model_runner.model
+        params_dict = dict(model.named_parameters())
+        target_buffers = [params_dict[name].data for name in param_names]
+        ray.experimental.set_target_for_ref(ref, target_buffers)
+        ray.get(ref)
+        return True
+
+    def get_param(self, name: str) -> torch.Tensor:
+        """Get a model parameter by name (for verification). Returns on CPU."""
+        model_runner = self.scheduler.tp_worker.model_runner
+        tensor = model_runner.get_weights_by_name(name, truncate_size=0)
+        if tensor is not None:
+            return tensor.cpu()
+        for pname, param in model_runner.model.named_parameters():
+            if pname == name:
+                return param.data.cpu()
+        raise KeyError(f"Parameter {name!r} not found")
