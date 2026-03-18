@@ -69,9 +69,11 @@ class SchedulerActor:
         if assigned_gpus:
             # Ray assigned specific GPU(s), use the first one
             actual_gpu_id = int(assigned_gpus[0])
+            logger.info(f"[TP{tp_rank}] Ray assigned GPU: {actual_gpu_id}")
         else:
             # Fallback to passed gpu_id
             actual_gpu_id = gpu_id
+            logger.info(f"[TP{tp_rank}] Using passed gpu_id: {gpu_id}")
 
         # Configure worker (logging, process title, etc.)
         dp_rank = configure_scheduler(
@@ -113,7 +115,7 @@ class SchedulerActor:
             torch.cuda.set_device(self.scheduler.gpu_id)
             self.scheduler.run_event_loop()
         except Exception as e:
-            logger.error("Scheduler PP%s TP%s crashed: %s", self._pp_rank, self._tp_rank, e)
+            logger.error(f"Scheduler PP{self._pp_rank} TP{self._tp_rank} crashed: {e}")
             raise
 
     # ------------------------------------------------------------------
