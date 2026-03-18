@@ -16,20 +16,16 @@
 from __future__ import annotations
 
 import logging
-import os
-import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import ray
 import torch
-import sys
 
 if TYPE_CHECKING:
     from sglang.srt.server_args import PortArgs, ServerArgs
 
 
-logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
-logger = logging.getLogger("ray.serve")
+logger = logging.getLogger(__name__)
 
 
 @ray.remote
