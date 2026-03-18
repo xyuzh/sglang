@@ -66,11 +66,10 @@ def _find_engine_bundle(placement_group, nnodes: int) -> tuple[int, str]:
     try:
         return bundle_ips.index(engine_ip), engine_ip
     except ValueError:
-        logger.warning(
-            f"Engine node {engine_ip} not in any bundle {bundle_ips}, "
-            f"defaulting to bundle 0"
+        raise RuntimeError(
+            f"Engine node {engine_ip} not found in any placement group bundle {bundle_ips}. "
+            f"Rank-0 scheduler must be co-located with the Engine."
         )
-        return 0, engine_ip
 
 
 class RayEngine(Engine):
