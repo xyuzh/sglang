@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@ray.remote
+@ray.remote(max_concurrency=2)
 class SchedulerActor:
     """Ray actor wrapper for SGLang Scheduler.
 
@@ -151,20 +151,17 @@ class SchedulerActor:
             hidden_size=getattr(model.config, "hidden_size", None),
         )
 
-
-    def pull_weights(self, trainer_handle, param_names: list, tp_rank: int) -> bool:
+    def pull_weights(self, weights_ref, param_names: list) -> bool:
         """Pull pre-sharded weight bucket from trainer via RDT zero-copy.
 
         Uses set_target_for_ref to RDMA directly into param.data buffers,
         eliminating intermediate receive buffers and copy operations.
         """
-        torch.cuda.set_device(self.scheduler.gpu_id)  # Guard for max_concurrency=2
-        ref = trainer_handle.export_weights_rdt.remote(tp_rank)
         model = self.scheduler.tp_worker.model_runner.model
         params_dict = dict(model.named_parameters())
         target_buffers = [params_dict[name].data for name in param_names]
-        ray.experimental.set_target_for_ref(ref, target_buffers)
-        ray.get(ref)
+        ray.experimental.set_target_for_ref(weights_ref, target_buffers)
+        ray.get(weights_ref)
         return True
 
     def get_param(self, name: str) -> torch.Tensor:
