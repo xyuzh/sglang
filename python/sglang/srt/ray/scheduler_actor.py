@@ -19,6 +19,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import ray
+import torch
 
 if TYPE_CHECKING:
     from sglang.srt.server_args import PortArgs, ServerArgs
@@ -27,12 +28,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@ray.remote
+@ray.remote(max_concurrency=2)
 class SchedulerActor:
     """Ray actor wrapper for SGLang Scheduler.
 
     Each actor manages one GPU and runs the Scheduler + TpModelWorker stack.
     Ray is used for process lifecycle; ZMQ handles request/response communication.
+
+    max_concurrency=2 allows weight sync methods (pull_weights, etc.)
+    to run while run_event_loop() is active.
     """
 
     def __init__(
@@ -113,3 +117,60 @@ class SchedulerActor:
         except Exception as e:
             logger.error(f"Scheduler PP{self._pp_rank} TP{self._tp_rank} crashed: {e}")
             raise
+
+    # ------------------------------------------------------------------
+    # Weight sync via RDT
+    # ------------------------------------------------------------------
+
+    def get_param_layout(self):
+        """Return shard config for this TP rank (fetched once at connect time)."""
+        from sglang.srt.ray.weight_sync import (
+            ParamInfo,
+            ParamLayout,
+            build_sharding_recipes,
+        )
+
+        model_runner = self.scheduler.tp_worker.model_runner
+        model = model_runner.model
+        tp_size = model_runner.tp_size
+
+        param_info = {
+            name: ParamInfo(shape=list(param.data.shape), dtype=param.data.dtype)
+            for name, param in model.named_parameters()
+        }
+        sharding_recipes = build_sharding_recipes(model, self._tp_rank, tp_size)
+
+        return ParamLayout(
+            tp_rank=self._tp_rank,
+            tp_size=tp_size,
+            param_info=param_info,
+            sharding_recipes=sharding_recipes,
+            stacked_params_mapping=getattr(model, "stacked_params_mapping", []),
+            num_attention_heads=getattr(model.config, "num_attention_heads", None),
+            num_key_value_heads=getattr(model.config, "num_key_value_heads", None),
+            hidden_size=getattr(model.config, "hidden_size", None),
+        )
+
+    def pull_weights(self, weights_ref, param_names: list) -> bool:
+        """Pull pre-sharded weight bucket from trainer via RDT zero-copy.
+
+        Uses set_target_for_ref to RDMA directly into param.data buffers,
+        eliminating intermediate receive buffers and copy operations.
+        """
+        model = self.scheduler.tp_worker.model_runner.model
+        params_dict = dict(model.named_parameters())
+        target_buffers = [params_dict[name].data for name in param_names]
+        ray.experimental.set_target_for_ref(weights_ref, target_buffers)
+        ray.get(weights_ref)
+        return True
+
+    def get_param(self, name: str) -> torch.Tensor:
+        """Get a model parameter by name (for verification). Returns on CPU."""
+        model_runner = self.scheduler.tp_worker.model_runner
+        tensor = model_runner.get_weights_by_name(name, truncate_size=0)
+        if tensor is not None:
+            return tensor.cpu()
+        for pname, param in model_runner.model.named_parameters():
+            if pname == name:
+                return param.data.cpu()
+        raise KeyError(f"Parameter {name!r} not found")
