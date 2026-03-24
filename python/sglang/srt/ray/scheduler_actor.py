@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import ray
+import torch
+from ray import ObjectRef
 
 if TYPE_CHECKING:
     from sglang.srt.server_args import PortArgs, ServerArgs
@@ -27,12 +29,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@ray.remote
+@ray.remote(max_concurrency=2)
 class SchedulerActor:
     """Ray actor wrapper for SGLang Scheduler.
 
     Each actor manages one GPU and runs the Scheduler + TpModelWorker stack.
     Ray is used for process lifecycle; ZMQ handles request/response communication.
+
+    max_concurrency=2 allows weight sync methods (pull_weights, etc.)
+    to run while run_event_loop() is active.
     """
 
     def __init__(
@@ -98,6 +103,9 @@ class SchedulerActor:
         self._tp_rank = tp_rank
         self._pp_rank = pp_rank
 
+        # Pre-register model weight tensors with NIXL for RDMA weight sync
+        self._init_nixl_registration()
+
     def get_info(self) -> Dict[str, Any]:
         """Return scheduler initialization info for handshake."""
         return self.scheduler.get_init_info()
@@ -113,3 +121,48 @@ class SchedulerActor:
         except Exception as e:
             logger.error(f"Scheduler PP{self._pp_rank} TP{self._tp_rank} crashed: {e}")
             raise
+
+    # ------------------------------------------------------------------
+    # Weight sync via NIXL
+    # ------------------------------------------------------------------
+
+    def _init_nixl_registration(self):
+        """Pre-register model weight tensors with NIXL for zero-copy RDMA."""
+        from ray.experimental import register_nixl_memory
+
+        model = self.scheduler.tp_worker.model_runner.model
+        for param in model.parameters():
+            register_nixl_memory(param.data)
+
+    def get_param_layout(self):
+        """Return param layout (fetched once at connect time)."""
+        from sglang.srt.ray.weight_sync import ParamLayout, build_sharding_recipes
+
+        model = self.scheduler.tp_worker.model_runner.model
+        return ParamLayout(sharding_recipes=build_sharding_recipes(model))
+
+    def pull_weights(self, weights_refs: List[ObjectRef], param_names: list) -> bool:
+        """Pull pre-sharded weight bucket from trainer via RDT zero-copy.
+
+        Uses set_target_for_ref to RDMA directly into param.data buffers,
+        eliminating intermediate receive buffers and copy operations.
+
+        Have to pass weights_refs as a list to avoid resolving upon calling `pull_weights`
+        """
+        model = self.scheduler.tp_worker.model_runner.model
+        params_dict = dict(model.named_parameters())
+        target_buffers = [params_dict[name].data for name in param_names]
+        ray.experimental.set_target_for_ref(weights_refs[0], target_buffers)
+        ray.get(weights_refs[0])
+        return True
+
+    def get_param(self, name: str) -> torch.Tensor:
+        """Get a model parameter by name (for verification). Returns on CPU."""
+        model_runner = self.scheduler.tp_worker.model_runner
+        tensor = model_runner.get_weights_by_name(name, truncate_size=0)
+        if tensor is not None:
+            return tensor.cpu()
+        for pname, param in model_runner.model.named_parameters():
+            if pname == name:
+                return param.data.cpu()
+        raise KeyError(f"Parameter {name!r} not found")
