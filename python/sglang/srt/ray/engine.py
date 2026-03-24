@@ -144,7 +144,7 @@ class RayEngine(Engine):
                     actor = SchedulerActor.options(
                         num_cpus=0,
                         num_gpus=1,
-                        name=f"sglang_scheduler_rank0node={rank0_node_ip}_pp{pp_rank}_tp{tp_rank}",
+                        name=f"sglang_scheduler_rank0node={rank0_node_ip}:{server_args.port}_pp{pp_rank}_tp{tp_rank}",
                         scheduling_strategy=PlacementGroupSchedulingStrategy(
                             placement_group=pg,
                             placement_group_bundle_index=bundle_idx,
