@@ -114,12 +114,12 @@ class RayEngine(Engine):
         ]
         rank0_node_ip = engine_ip
 
-        if server_args.dp_size > 1 or server_args.enable_dp_attention:
-            return cls._launch_dp_scheduler_processes(
+        if server_args.dp_size == 1:
+            return cls._launch_single_dp_scheduler_processes(
                 server_args, port_args, pg, bundle_for_node, rank0_node_ip
             )
         else:
-            return cls._launch_single_dp_scheduler_processes(
+            return cls._launch_dp_scheduler_processes(
                 server_args, port_args, pg, bundle_for_node, rank0_node_ip
             )
 
