@@ -124,77 +124,6 @@ class RayEngine(Engine):
             )
 
     @classmethod
-    def _launch_dp_scheduler_processes(
-        cls,
-        server_args: ServerArgs,
-        port_args: PortArgs,
-        pg,
-        bundle_for_node: list,
-        rank0_node_ip: str,
-    ) -> RaySchedulerInitResult:
-        """Launch DP schedulers via RayDataParallelController."""
-        from sglang.srt.ray.data_parallel_controller import (
-            RayDataParallelController,
-        )
-
-        if server_args.enable_dp_attention:
-            # DP attention folds DP into TP — total GPUs = tp_size * pp_size
-            total_gpus = server_args.tp_size * server_args.pp_size
-        else:
-            total_gpus = server_args.dp_size * server_args.tp_size * server_args.pp_size
-        gpus_per_node = total_gpus // server_args.nnodes
-        logger.info(
-            f"Ray DP cluster: {server_args.nnodes} nodes, "
-            f"{gpus_per_node} GPUs/node, dp_size={server_args.dp_size}, "
-            f"tp_size={server_args.tp_size}, pp_size={server_args.pp_size}, "
-            f"enable_dp_attention={server_args.enable_dp_attention}"
-        )
-
-        # Set dist_init_addr on server_args so PortArgs.init_new() can compute
-        # TCP addresses correctly (required for DP attention path).
-        dp_server_args = dataclasses.replace(
-            server_args,
-            dist_init_addr=f"{rank0_node_ip}:{server_args.port + ZMQ_TCP_PORT_DELTA}",
-        )
-
-        # Create the DP controller in-process. This blocks until all actors
-        # are initialized and their event loops have started.
-        controller = RayDataParallelController(
-            dp_server_args, port_args, pg, bundle_for_node, rank0_node_ip
-        )
-
-        # Start the DP controller's event loop in a daemon thread.
-        # It routes requests from the tokenizer to per-DP-rank schedulers.
-        dp_thread = threading.Thread(
-            target=controller.event_loop, daemon=True, name="dp_controller"
-        )
-        dp_thread.start()
-
-        scheduler_infos = [
-            {
-                "max_total_num_tokens": controller.max_total_num_tokens,
-                "max_req_input_len": controller.max_req_input_len,
-            }
-        ]
-
-        event_loop_refs = controller.event_loop_refs
-
-        def wait_for_completion():
-            try:
-                ray.get(event_loop_refs)
-            except Exception as e:
-                logger.error(f"Ray scheduler actor terminated with error: {e}")
-
-        return (
-            RaySchedulerInitResult(
-                scheduler_infos=scheduler_infos,
-                wait_for_completion=wait_for_completion,
-                scheduler_actors=controller.scheduler_actors,
-            ),
-            None,
-        )
-
-    @classmethod
     def _launch_single_dp_scheduler_processes(
         cls,
         server_args: ServerArgs,
@@ -280,6 +209,77 @@ class RayEngine(Engine):
                 scheduler_infos=scheduler_infos,
                 wait_for_completion=wait_for_completion,
                 scheduler_actors=scheduler_actors,
+            ),
+            None,
+        )
+
+    @classmethod
+    def _launch_dp_scheduler_processes(
+        cls,
+        server_args: ServerArgs,
+        port_args: PortArgs,
+        pg,
+        bundle_for_node: list,
+        rank0_node_ip: str,
+    ) -> RaySchedulerInitResult:
+        """Launch DP schedulers via RayDataParallelController."""
+        from sglang.srt.ray.data_parallel_controller import (
+            RayDataParallelController,
+        )
+
+        if server_args.enable_dp_attention:
+            # DP attention folds DP into TP — total GPUs = tp_size * pp_size
+            total_gpus = server_args.tp_size * server_args.pp_size
+        else:
+            total_gpus = server_args.dp_size * server_args.tp_size * server_args.pp_size
+        gpus_per_node = total_gpus // server_args.nnodes
+        logger.info(
+            f"Ray DP cluster: {server_args.nnodes} nodes, "
+            f"{gpus_per_node} GPUs/node, dp_size={server_args.dp_size}, "
+            f"tp_size={server_args.tp_size}, pp_size={server_args.pp_size}, "
+            f"enable_dp_attention={server_args.enable_dp_attention}"
+        )
+
+        # Set dist_init_addr on server_args so PortArgs.init_new() can compute
+        # TCP addresses correctly (required for DP attention path).
+        dp_server_args = dataclasses.replace(
+            server_args,
+            dist_init_addr=f"{rank0_node_ip}:{server_args.port + ZMQ_TCP_PORT_DELTA}",
+        )
+
+        # Create the DP controller in-process. This blocks until all actors
+        # are initialized and their event loops have started.
+        controller = RayDataParallelController(
+            dp_server_args, port_args, pg, bundle_for_node, rank0_node_ip
+        )
+
+        # Start the DP controller's event loop in a daemon thread.
+        # It routes requests from the tokenizer to per-DP-rank schedulers.
+        dp_thread = threading.Thread(
+            target=controller.event_loop, daemon=True, name="dp_controller"
+        )
+        dp_thread.start()
+
+        scheduler_infos = [
+            {
+                "max_total_num_tokens": controller.max_total_num_tokens,
+                "max_req_input_len": controller.max_req_input_len,
+            }
+        ]
+
+        event_loop_refs = controller.event_loop_refs
+
+        def wait_for_completion():
+            try:
+                ray.get(event_loop_refs)
+            except Exception as e:
+                logger.error(f"Ray scheduler actor terminated with error: {e}")
+
+        return (
+            RaySchedulerInitResult(
+                scheduler_infos=scheduler_infos,
+                wait_for_completion=wait_for_completion,
+                scheduler_actors=controller.scheduler_actors,
             ),
             None,
         )
