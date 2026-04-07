@@ -115,103 +115,105 @@ class RayEngine(Engine):
         rank0_node_ip = engine_ip
 
         if server_args.dp_size == 1:
-            return cls._launch_single_dp_scheduler_processes(
-                server_args, port_args, pg, bundle_for_node, rank0_node_ip
+            # Launch tensor parallel scheduler actors
+            world_size = server_args.tp_size * server_args.pp_size
+            gpus_per_node = world_size // nnodes
+
+            logger.info(
+                f"Ray cluster: {nnodes} nodes, "
+                f"Use {gpus_per_node} GPUs/node, world_size={world_size}"
+            )
+
+            dist_init_addr = (
+                f"{rank0_node_ip}:{server_args.port + ZMQ_TCP_PORT_DELTA}"
+            )
+            logger.info(f"dist_init_addr: {dist_init_addr}")
+
+            scheduler_actors = []
+
+            for node_idx in range(nnodes):
+                bundle_idx = bundle_for_node[node_idx]
+                pp_range, tp_range, pp_per_node, tp_per_node = (
+                    _calculate_rank_ranges(
+                        nnodes,
+                        server_args.pp_size,
+                        server_args.tp_size,
+                        node_rank=node_idx,
+                    )
+                )
+                for pp_rank in pp_range:
+                    for tp_rank in tp_range:
+                        local_gpu_idx = (
+                            pp_rank % pp_per_node
+                        ) * tp_per_node + (tp_rank % tp_per_node)
+
+                        attn_cp_rank, moe_dp_rank, moe_ep_rank = (
+                            _compute_parallelism_ranks(server_args, tp_rank)
+                        )
+
+                        actor = SchedulerActor.options(
+                            num_cpus=0,
+                            num_gpus=1,
+                            name=f"sglang_scheduler_rank0node={rank0_node_ip}_pp{pp_rank}_tp{tp_rank}",
+                            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                                placement_group=pg,
+                                placement_group_bundle_index=bundle_idx,
+                            ),
+                        ).remote(
+                            server_args=server_args,
+                            port_args=port_args,
+                            gpu_id=local_gpu_idx,
+                            tp_rank=tp_rank,
+                            attn_cp_rank=attn_cp_rank,
+                            moe_dp_rank=moe_dp_rank,
+                            moe_ep_rank=moe_ep_rank,
+                            pp_rank=pp_rank,
+                            dp_rank=0,
+                            dist_init_addr=dist_init_addr,
+                        )
+                        scheduler_actors.append(actor)
+
+            try:
+                scheduler_infos = ray.get(
+                    [actor.get_info.remote() for actor in scheduler_actors]
+                )
+            except ray.exceptions.RayActorError as e:
+                for actor in scheduler_actors:
+                    try:
+                        ray.kill(actor)
+                    except Exception:
+                        logger.error(
+                            f"Failed to kill Ray scheduler actor: {actor}"
+                        )
+                raise RuntimeError(
+                    f"Scheduler actor failed to initialize: {e}"
+                )
+
+            event_loop_refs = [
+                actor.run_event_loop.remote() for actor in scheduler_actors
+            ]
+
+            def wait_for_completion():
+                try:
+                    ray.get(event_loop_refs)
+                except Exception as e:
+                    logger.error(
+                        f"Ray scheduler actor terminated with error: {e}"
+                    )
+
+            return (
+                RaySchedulerInitResult(
+                    scheduler_infos=scheduler_infos,
+                    wait_for_completion=wait_for_completion,
+                    scheduler_actors=scheduler_actors,
+                ),
+                None,
             )
         else:
+            # Launch the data parallel controller
             return cls._launch_dp_scheduler_processes(
                 server_args, port_args, pg, bundle_for_node, rank0_node_ip
             )
-
-    @classmethod
-    def _launch_single_dp_scheduler_processes(
-        cls,
-        server_args: ServerArgs,
-        port_args: PortArgs,
-        pg,
-        bundle_for_node: list,
-        rank0_node_ip: str,
-    ) -> RaySchedulerInitResult:
-        """Launch schedulers for dp_size=1 (no DP controller needed)."""
-        nnodes = server_args.nnodes
-        world_size = server_args.tp_size * server_args.pp_size
-        gpus_per_node = world_size // nnodes
-
-        logger.info(
-            f"Ray cluster: {nnodes} nodes, "
-            f"Use {gpus_per_node} GPUs/node, world_size={world_size}"
-        )
-
-        dist_init_addr = f"{rank0_node_ip}:{server_args.port + ZMQ_TCP_PORT_DELTA}"
-        logger.info(f"dist_init_addr: {dist_init_addr}")
-
-        scheduler_actors = []
-
-        for node_idx in range(nnodes):
-            bundle_idx = bundle_for_node[node_idx]
-            pp_range, tp_range, pp_per_node, tp_per_node = _calculate_rank_ranges(
-                nnodes, server_args.pp_size, server_args.tp_size, node_rank=node_idx
-            )
-            for pp_rank in pp_range:
-                for tp_rank in tp_range:
-                    local_gpu_idx = (pp_rank % pp_per_node) * tp_per_node + (
-                        tp_rank % tp_per_node
-                    )
-
-                    attn_cp_rank, moe_dp_rank, moe_ep_rank = _compute_parallelism_ranks(
-                        server_args, tp_rank
-                    )
-
-                    actor = SchedulerActor.options(
-                        num_cpus=0,
-                        num_gpus=1,
-                        name=f"sglang_scheduler_rank0node={rank0_node_ip}_pp{pp_rank}_tp{tp_rank}",
-                        scheduling_strategy=PlacementGroupSchedulingStrategy(
-                            placement_group=pg,
-                            placement_group_bundle_index=bundle_idx,
-                        ),
-                    ).remote(
-                        server_args=server_args,
-                        port_args=port_args,
-                        gpu_id=local_gpu_idx,
-                        tp_rank=tp_rank,
-                        attn_cp_rank=attn_cp_rank,
-                        moe_dp_rank=moe_dp_rank,
-                        moe_ep_rank=moe_ep_rank,
-                        pp_rank=pp_rank,
-                        dp_rank=0,
-                        dist_init_addr=dist_init_addr,
-                    )
-                    scheduler_actors.append(actor)
-
-        try:
-            scheduler_infos = ray.get(
-                [actor.get_info.remote() for actor in scheduler_actors]
-            )
-        except ray.exceptions.RayActorError as e:
-            for actor in scheduler_actors:
-                try:
-                    ray.kill(actor)
-                except Exception:
-                    logger.error(f"Failed to kill Ray scheduler actor: {actor}")
-            raise RuntimeError(f"Scheduler actor failed to initialize: {e}")
-
-        event_loop_refs = [actor.run_event_loop.remote() for actor in scheduler_actors]
-
-        def wait_for_completion():
-            try:
-                ray.get(event_loop_refs)
-            except Exception as e:
-                logger.error(f"Ray scheduler actor terminated with error: {e}")
-
-        return (
-            RaySchedulerInitResult(
-                scheduler_infos=scheduler_infos,
-                wait_for_completion=wait_for_completion,
-                scheduler_actors=scheduler_actors,
-            ),
-            None,
-        )
 
     @classmethod
     def _launch_dp_scheduler_processes(
