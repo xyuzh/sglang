@@ -32,6 +32,11 @@ from sglang.test.test_utils import DEFAULT_SMALL_MODEL_NAME_FOR_TEST
 # Allow overriding the model via env var for environments without gated access
 _MODEL = os.environ.get("SGLANG_TEST_MODEL", DEFAULT_SMALL_MODEL_NAME_FOR_TEST)
 
+# DP attention requires a model whose num_kv_heads divides evenly across the
+# attention-TP dimension.  Qwen2.5-0.5B (kv_heads=2, attn_heads=14) hits a
+# shape mismatch in the KV cache, so we use a larger model here.
+_DP_ATTN_MODEL = os.environ.get("SGLANG_TEST_DP_ATTN_MODEL", "Qwen/Qwen3-8B")
+
 try:
     import ray
     from ray.runtime_env import RuntimeEnv
@@ -303,7 +308,12 @@ class TestRayEngineOfflineDPAttention(unittest.TestCase):
         cls.actor, cls.pg = _create_engine_on_pg(
             tp_size=2,
             dp_size=2,
-            extra_kwargs={"enable_dp_attention": True},
+            model=_DP_ATTN_MODEL,
+            extra_kwargs={
+                "enable_dp_attention": True,
+                "disable_cuda_graph": True,
+                "port": 31500,
+            },
         )
 
     @classmethod

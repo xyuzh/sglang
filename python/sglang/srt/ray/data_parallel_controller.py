@@ -157,6 +157,16 @@ class RayDataParallelController(DataParallelController):
                         )
                         # All DP ranks share the same NCCL port (reuse TP group)
                         rank_port_args.nccl_port = port_args.nccl_port
+                        # The detokenizer and tokenizer bind using the
+                        # original port_args addresses (127.0.0.1 when
+                        # dist_init_addr is unset).  Scheduler actors must
+                        # connect to the same addresses.
+                        rank_port_args.detokenizer_ipc_name = (
+                            port_args.detokenizer_ipc_name
+                        )
+                        rank_port_args.tokenizer_ipc_name = (
+                            port_args.tokenizer_ipc_name
+                        )
 
                     local_gpu_idx = (pp_rank % pp_per_node) * tp_per_node + (
                         tp_rank % tp_per_node

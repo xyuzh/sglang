@@ -91,13 +91,8 @@ class RayEngine(Engine):
         server_args: ServerArgs,
         port_args: PortArgs,
         run_scheduler_process_func: Callable,
-    ) -> tuple[SchedulerInitResult, None]:
-        """Launch schedulers as Ray actors.
-
-        Returns:
-            Tuple of (RaySchedulerInitResult, None).
-            scheduler_procs is None since Ray uses actors instead of mp.Process.
-        """
+    ) -> SchedulerInitResult:
+        """Launch schedulers as Ray actors."""
         pg = ray.util.get_current_placement_group()
         if pg is None:
             raise RuntimeError(
@@ -201,13 +196,10 @@ class RayEngine(Engine):
                         f"Ray scheduler actor terminated with error: {e}"
                     )
 
-            return (
-                RaySchedulerInitResult(
-                    scheduler_infos=scheduler_infos,
-                    wait_for_completion=wait_for_completion,
-                    scheduler_actors=scheduler_actors,
-                ),
-                None,
+            return RaySchedulerInitResult(
+                scheduler_infos=scheduler_infos,
+                wait_for_completion=wait_for_completion,
+                scheduler_actors=scheduler_actors,
             )
         else:
             # Launch the data parallel controller
@@ -277,11 +269,8 @@ class RayEngine(Engine):
             except Exception as e:
                 logger.error(f"Ray scheduler actor terminated with error: {e}")
 
-        return (
-            RaySchedulerInitResult(
-                scheduler_infos=scheduler_infos,
-                wait_for_completion=wait_for_completion,
-                scheduler_actors=controller.scheduler_actors,
-            ),
-            None,
+        return RaySchedulerInitResult(
+            scheduler_infos=scheduler_infos,
+            wait_for_completion=wait_for_completion,
+            scheduler_actors=controller.scheduler_actors,
         )
