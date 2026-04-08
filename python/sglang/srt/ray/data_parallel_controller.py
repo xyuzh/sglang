@@ -65,7 +65,7 @@ class RayDataParallelController(DataParallelController):
         super().__init__(server_args, port_args, run_scheduler_process_func=None)
 
     def launch_dp_schedulers(self, server_args: ServerArgs, port_args: PortArgs):
-        """Override: create Ray actors per DP rank (no threads needed)."""
+        """Override: launch Ray scheduler actors per DP rank."""
         sockets = []
         dp_port_args_list = []
 
