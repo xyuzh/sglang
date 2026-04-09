@@ -130,7 +130,7 @@ class RayDataParallelController(DataParallelController):
         For regular DP, dp_rank is an integer and worker_ports is None.
         """
         nnodes = server_args.nnodes
-        actors_before = len(self.scheduler_actors)
+        batch_start_idx = len(self.scheduler_actors)
 
         for node_idx in range(nnodes):
             bundle_idx = self.bundle_for_node[node_idx]
@@ -209,10 +209,10 @@ class RayDataParallelController(DataParallelController):
                     self.scheduler_actors.append(actor)
 
         # Wait for all actors created in this call to initialize
-        new_actors = self.scheduler_actors[actors_before:]
+        batch_actors = self.scheduler_actors[batch_start_idx:]
         try:
             scheduler_infos = ray.get(
-                [actor.get_info.remote() for actor in new_actors]
+                [actor.get_info.remote() for actor in batch_actors]
             )
         except ray.exceptions.RayActorError as e:
             for actor in self.scheduler_actors:
@@ -229,7 +229,7 @@ class RayDataParallelController(DataParallelController):
 
         # Start event loops (non-blocking — runs until actor is killed)
         self.event_loop_refs.extend(
-            [actor.run_event_loop.remote() for actor in new_actors]
+            [actor.run_event_loop.remote() for actor in batch_actors]
         )
 
     # Override launch_tensor_parallel_group to be a no-op since we don't use it.
