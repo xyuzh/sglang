@@ -30,7 +30,7 @@ from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.managers.data_parallel_controller import DataParallelController
 from sglang.srt.ray.scheduler_actor import SchedulerActor
 from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.utils.network import bind_port, get_zmq_socket
+from sglang.srt.utils.network import bind_port, get_zmq_socket, get_zmq_socket_on_host
 
 logger = logging.getLogger(__name__)
 
@@ -101,13 +101,17 @@ class RayDataParallelController(DataParallelController):
         self, server_args: ServerArgs, port_args: PortArgs
     ):
         """Override: pre-allocate ports, skip broadcast, create Ray actors."""
-        # Pre-allocate worker ports on the controller node
+        # Pre-allocate worker ports on the controller node, binding to the
+        # rank-0 node IP instead of tcp://* to avoid exposing unauthenticated
+        # ZMQ sockets (CVE-2026-3060).
         worker_ports = []
         for dp_rank in range(server_args.dp_size):
-            port_and_socket = get_zmq_socket(self.context, zmq.PUSH)
-            worker_ports.append(port_and_socket[0])
-            self.workers[dp_rank] = port_and_socket[1]
-            logger.debug(f"Assigned port {port_and_socket[0]} to worker {dp_rank}")
+            worker_port, worker_socket = get_zmq_socket_on_host(
+                self.context, zmq.PUSH, host=self.rank0_node_ip
+            )
+            worker_ports.append(worker_port)
+            self.workers[dp_rank] = worker_socket
+            logger.debug(f"Assigned port {worker_port} to worker {dp_rank}")
 
         # Skip _broadcast_worker_ports — Ray creates all actors centrally,
         # so there's no need for the inter-node handshake protocol.
